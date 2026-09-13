@@ -1,0 +1,29 @@
+# Sonora Score — Starlight Echoes
+# Ambient soundscape demonstrating reverb, shimmer chimes, and pluck delays
+
+title "Starlight Echoes"
+tempo 68
+time 4/4
+
+track background (pad):
+    chord(D3, A3, F4) doubleWhole
+    chord(G3, D4, Bb4) doubleWhole
+
+track bells (chime):
+    rest whole
+    D5 half
+    A5 half
+    rest half
+    F5 quarter
+    E5 quarter
+    D5 whole
+
+track melody (pluck):
+    A4 quarter
+    D5 quarter
+    F5 eighth
+    E5 eighth
+    D5 quarter
+    rest quarter
+    G4 quarter
+    Bb4 half

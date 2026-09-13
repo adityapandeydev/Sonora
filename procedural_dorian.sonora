@@ -1,0 +1,130 @@
+# Sonora Declarative Music Score
+# Title: Procedural Session (Seed 12345)
+tempo 120.0
+time 4/4
+
+track Chords (pad):
+    F4 whole mf
+    A4 whole mf
+    D4 whole mf
+    D5 whole mf
+    F5 whole mf
+    B4 whole mf
+    D5 whole mf
+    G5 whole mf
+    B4 whole mf
+    E5 whole mf
+    A5 whole mf
+    C5 whole mf
+    D5 whole mf
+    F5 whole mf
+    A4 whole mf
+    D5 whole mf
+    F5 whole mf
+    B4 whole mf
+    D5 whole mf
+    G5 whole mf
+    B4 whole mf
+    E5 whole mf
+    A5 whole mf
+    C5 whole mf
+
+track Melody (lead):
+    F5 eighth f
+    E5 dotted half f
+    G5 quarter f
+    A5 quarter mf
+    G5 dotted half f
+    F5 dotted half f
+    A5 quarter mf
+    G5 eighth mf
+    A5 quarter f
+    B5 dotted half mf
+    B5 quarter f
+    A5 quarter mf
+    F5 dotted half mf
+    G5 dotted half mf
+    A5 dotted half mf
+    G5 dotted half mf
+    F5 eighth f
+    E5 eighth f
+    G5 eighth f
+    A5 quarter mf
+    B5 eighth mf
+    C6 quarter f
+    B5 quarter f
+    C6 dotted half mf
+    D6 quarter mf
+    D6 quarter f
+    D6 quarter mf
+    C6 dotted half f
+    D6 dotted half f
+    D6 eighth f
+    C6 eighth mf
+    B5 quarter f
+
+track Bassline (bass):
+    D2 eighth mf
+    D2 eighth mf
+    D2 eighth mf
+    D2 eighth mf
+    D2 eighth mf
+    D2 eighth mf
+    D2 eighth mf
+    D2 eighth mf
+    B2 eighth mf
+    B2 eighth mf
+    B2 eighth mf
+    B2 eighth mf
+    B2 eighth mf
+    B2 eighth mf
+    B2 eighth mf
+    B2 eighth mf
+    G2 eighth mf
+    G2 eighth mf
+    G2 eighth mf
+    G2 eighth mf
+    G2 eighth mf
+    G2 eighth mf
+    G2 eighth mf
+    G2 eighth mf
+    A2 eighth mf
+    A2 eighth mf
+    A2 eighth mf
+    A2 eighth mf
+    A2 eighth mf
+    A2 eighth mf
+    A2 eighth mf
+    A2 eighth mf
+    D2 eighth mf
+    D2 eighth mf
+    D2 eighth mf
+    D2 eighth mf
+    D2 eighth mf
+    D2 eighth mf
+    D2 eighth mf
+    D2 eighth mf
+    B2 eighth mf
+    B2 eighth mf
+    B2 eighth mf
+    B2 eighth mf
+    B2 eighth mf
+    B2 eighth mf
+    B2 eighth mf
+    B2 eighth mf
+    G2 eighth mf
+    G2 eighth mf
+    G2 eighth mf
+    G2 eighth mf
+    G2 eighth mf
+    G2 eighth mf
+    G2 eighth mf
+    G2 eighth mf
+    A2 eighth mf
+    A2 eighth mf
+    A2 eighth mf
+    A2 eighth mf
+    A2 eighth mf
+    A2 eighth mf
+    A2 eighth mf
+    A2 eighth mf

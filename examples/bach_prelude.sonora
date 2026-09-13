@@ -1,0 +1,88 @@
+# Sonora Score — J.S. Bach: Prelude in C Major (BWV 846) excerpt
+# Demonstrates arpeggiated piano voice leading and classical counterpoint
+
+title "Bach - Prelude in C Major"
+tempo 72
+time 4/4
+
+instrument piano:
+    oscillator triangle
+    cutoff 3200
+    resonance 0.8
+    envelope 0.005 0.35 0.25 0.35
+
+track prelude (piano):
+    # Bar 1: C - E - G - C5 - E5
+    C4 sixteenth
+    E4 sixteenth
+    G4 sixteenth
+    C5 sixteenth
+    E5 sixteenth
+    G4 sixteenth
+    C5 sixteenth
+    E5 sixteenth
+    C4 sixteenth
+    E4 sixteenth
+    G4 sixteenth
+    C5 sixteenth
+    E5 sixteenth
+    G4 sixteenth
+    C5 sixteenth
+    E5 sixteenth
+
+    # Bar 2: D - F - A - D5 - F5
+    D4 sixteenth
+    F4 sixteenth
+    A4 sixteenth
+    D5 sixteenth
+    F5 sixteenth
+    A4 sixteenth
+    D5 sixteenth
+    F5 sixteenth
+    D4 sixteenth
+    F4 sixteenth
+    A4 sixteenth
+    D5 sixteenth
+    F5 sixteenth
+    A4 sixteenth
+    D5 sixteenth
+    F5 sixteenth
+
+    # Bar 3: B3 - D4 - G4 - D5 - F5
+    B3 sixteenth
+    D4 sixteenth
+    G4 sixteenth
+    D5 sixteenth
+    F5 sixteenth
+    G4 sixteenth
+    D5 sixteenth
+    F5 sixteenth
+    B3 sixteenth
+    D4 sixteenth
+    G4 sixteenth
+    D5 sixteenth
+    F5 sixteenth
+    G4 sixteenth
+    D5 sixteenth
+    F5 sixteenth
+
+    # Bar 4: C4 - E4 - G4 - C5 - E5
+    C4 sixteenth
+    E4 sixteenth
+    G4 sixteenth
+    C5 sixteenth
+    E5 sixteenth
+    G4 sixteenth
+    C5 sixteenth
+    E5 sixteenth
+    C4 sixteenth
+    E4 sixteenth
+    G4 sixteenth
+    C5 sixteenth
+    E5 sixteenth
+    G4 sixteenth
+    C5 sixteenth
+    E5 sixteenth
+
+    # Final Cadence
+    chord(C3, G3, C4, E4) whole

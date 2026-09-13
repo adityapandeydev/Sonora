@@ -1,0 +1,77 @@
+# Sonora Score — Synthwave Outrun
+# Demonstrates multi-track polyphonic synthesis, bassline, pad chords, and lead melody
+
+title "Synthwave Outrun"
+tempo 124
+time 4/4
+
+track bass (bass):
+    # Bar 1: A1 driving eighths
+    A1 eighth
+    A1 eighth
+    A1 eighth
+    A1 eighth
+    A1 eighth
+    A1 eighth
+    A1 eighth
+    A1 eighth
+
+    # Bar 2: F1 driving eighths
+    F1 eighth
+    F1 eighth
+    F1 eighth
+    F1 eighth
+    F1 eighth
+    F1 eighth
+    F1 eighth
+    F1 eighth
+
+    # Bar 3: C2 driving eighths
+    C2 eighth
+    C2 eighth
+    C2 eighth
+    C2 eighth
+    C2 eighth
+    C2 eighth
+    C2 eighth
+    C2 eighth
+
+    # Bar 4: G1 driving eighths
+    G1 eighth
+    G1 eighth
+    G1 eighth
+    G1 eighth
+    G1 eighth
+    G1 eighth
+    G1 eighth
+    G1 eighth
+
+track pad (pad):
+    # Sustained chords: Am, F, C, G
+    chord(A3, C4, E4) whole
+    chord(F3, A3, C4) whole
+    chord(C3, E3, G3) whole
+    chord(G3, B3, D4) whole
+
+track lead (lead):
+    # Bar 1
+    E4 quarter
+    E4 quarter
+    G4 quarter
+    A4 quarter
+
+    # Bar 2
+    F4 quarter
+    E4 eighth
+    D4 eighth
+    C4 half
+
+    # Bar 3
+    G4 quarter
+    A4 eighth
+    B4 eighth
+    C5 half
+
+    # Bar 4
+    B4 half
+    G4 half
