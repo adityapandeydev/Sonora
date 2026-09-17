@@ -1,0 +1,8 @@
+cradle:
+  cabal:
+    - path: "src"
+      component: "lib:sonora"
+    - path: "app"
+      component: "exe:sonora"
+    - path: "test"
+      component: "test:sonora-test"

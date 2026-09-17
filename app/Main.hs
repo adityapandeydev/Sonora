@@ -2,17 +2,17 @@
 module Main (main) where
 
 import Control.Monad (when)
-import qualified Data.ByteString.Lazy as BL
 import Data.List (intercalate)
 import Data.Maybe (fromMaybe)
 import Data.Word (Word64)
-import Options.Applicative
-import System.Directory (createDirectoryIfMissing, getTemporaryDirectory)
-import System.Exit (exitFailure, exitSuccess)
+import Options.Applicative hiding (many)
+import System.Directory (getTemporaryDirectory)
+import System.Exit (exitFailure)
 import System.FilePath ((</>), replaceExtension, takeBaseName)
 import System.IO (hPutStrLn, stderr)
 import System.Process (callCommand)
-import Text.Parsec (parse, spaces, string, try)
+import Text.Parsec (parse, spaces, try, many, errorPos)
+import Text.Parsec.Pos (sourceLine, sourceColumn)
 
 import Sonora
 
@@ -43,16 +43,26 @@ data GenerateOptions = GenerateOptions
     , goBPM       :: !Double
     , goOutput    :: !(Maybe FilePath)
     , goRenderWav :: !(Maybe FilePath)
+    , goJson      :: !Bool
     }
 
 data InspectOptions = InspectOptions
     { ioInput :: !FilePath
+    , ioJson  :: !Bool
     }
 
 data SynthOptions = SynthOptions
-    { soPreset :: !String
-    , soNotes  :: !String
-    , soOutput :: !FilePath
+    { soPreset    :: !String
+    , soNotes     :: !(Maybe String)
+    , soPitch     :: !String
+    , soDuration  :: !Double
+    , soCutoff    :: !(Maybe Double)
+    , soResonance :: !(Maybe Double)
+    , soAttack    :: !(Maybe Double)
+    , soDecay     :: !(Maybe Double)
+    , soSustain   :: !(Maybe Double)
+    , soRelease   :: !(Maybe Double)
+    , soOutput    :: !FilePath
     }
 
 -- CLI Parser
@@ -75,16 +85,26 @@ generateParser = CmdGenerate <$> (GenerateOptions
     <*> option auto (short 'b' <> long "bars" <> value 8 <> showDefault <> help "Number of bars to generate")
     <*> option auto (long "bpm" <> value 120.0 <> showDefault <> help "Tempo in BPM")
     <*> optional (strOption (short 'o' <> long "output" <> metavar "OUTPUT" <> help "Output .sonora score file path"))
-    <*> optional (strOption (long "render" <> metavar "WAV" <> help "Directly render generated score to WAV file")))
+    <*> optional (strOption (long "render" <> metavar "WAV" <> help "Directly render generated score to WAV file"))
+    <*> switch (long "json" <> help "Output generation results in structured JSON format"))
 
 inspectParser :: Parser Command
 inspectParser = CmdInspect <$> (InspectOptions
-    <$> strArgument (metavar "INPUT" <> help "Path to .sonora score file to inspect"))
+    <$> strArgument (metavar "INPUT" <> help "Path to .sonora score file to inspect")
+    <*> switch (long "json" <> help "Output inspection result in structured JSON format"))
 
 synthParser :: Parser Command
 synthParser = CmdSynth <$> (SynthOptions
     <$> strOption (short 'p' <> long "preset" <> value "piano" <> showDefault <> help "Preset: piano, lead, bass, pad, pluck, chime")
-    <*> strOption (short 'n' <> long "notes" <> metavar "NOTES" <> help "Notes string e.g. 'C4 quarter E4 quarter G4 half'")
+    <*> optional (strOption (short 'n' <> long "notes" <> metavar "NOTES" <> help "Notes sequence string"))
+    <*> strOption (long "pitch" <> value "C4" <> showDefault <> help "Pitch for single-note audition (e.g. C4, A3, F#5)")
+    <*> option auto (long "duration" <> value 1.0 <> showDefault <> help "Note duration in seconds")
+    <*> optional (option auto (long "cutoff" <> help "Override filter cutoff in Hz"))
+    <*> optional (option auto (long "resonance" <> help "Override filter resonance Q"))
+    <*> optional (option auto (long "attack" <> help "Override amp envelope attack in seconds"))
+    <*> optional (option auto (long "decay" <> help "Override amp envelope decay in seconds"))
+    <*> optional (option auto (long "sustain" <> help "Override amp envelope sustain level (0.0 - 1.0)"))
+    <*> optional (option auto (long "release" <> help "Override amp envelope release in seconds"))
     <*> strOption (short 'o' <> long "output" <> value "output.wav" <> showDefault <> help "Output WAV file"))
 
 cliParser :: Parser Command
@@ -112,6 +132,16 @@ main = do
         CmdGenerate go -> runGenerate go
         CmdInspect io  -> runInspect io
         CmdSynth so    -> runSynth so
+
+-- Helper to escape strings for JSON
+escapeJson :: String -> String
+escapeJson = concatMap $ \ch -> case ch of
+    '"'  -> "\\\""
+    '\\' -> "\\\\"
+    '\n' -> "\\n"
+    '\r' -> "\\r"
+    '\t' -> "\\t"
+    other -> [other]
 
 -- Command Implementations
 
@@ -143,52 +173,104 @@ runPlay PlayOptions{..} = do
     let tempWav = tempDir </> (takeBaseName poInput ++ "_preview.wav")
     runRender (RenderOptions poInput (Just tempWav) poSampleRate "16")
     putStrLn $ "[Sonora] Playing preview via system audio player..."
-    -- On Windows, invoke PowerShell Media.SoundPlayer
     let playCmd = "powershell -c \"(New-Object Media.SoundPlayer '" ++ tempWav ++ "').PlaySync()\""
     callCommand playCmd
 
 runGenerate :: GenerateOptions -> IO ()
 runGenerate GenerateOptions{..} = do
-    putStrLn $ "[Sonora] Generating procedural music with seed " ++ show goSeed ++ "..."
     let (root, sType) = parseScaleString goScale
         song = generateProceduralSong (Seed goSeed) sType root (BPM goBPM) goBars
+        dslContent = songToDSL song
 
     case goOutput of
-        Just dslPath -> do
-            writeFile dslPath (songToDSL song)
-            putStrLn $ "[Sonora] Saved procedural score to: " ++ dslPath
-        Nothing -> return ()
+        Just dslPath -> writeFile dslPath dslContent
+        Nothing      -> return ()
 
     case goRenderWav of
-        Just wavPath -> do
-            putStrLn $ "[Sonora] Rendering procedural audio to: " ++ wavPath
-            renderSongToWAV wavPath song
-            putStrLn $ "[Sonora] Render complete: " ++ wavPath
-        Nothing ->
-            when (goOutput == Nothing) $ do
-                let defPath = "procedural_seed_" ++ show goSeed ++ ".sonora"
-                writeFile defPath (songToDSL song)
-                putStrLn $ "[Sonora] Wrote score to default path: " ++ defPath
+        Just wavPath -> renderSongToWAV wavPath song
+        Nothing      -> return ()
+
+    if goJson
+        then do
+            putStrLn $ "{"
+                ++ "\"status\":\"ok\","
+                ++ "\"seed\":" ++ show goSeed ++ ","
+                ++ "\"scale\":\"" ++ escapeJson goScale ++ "\","
+                ++ "\"bars\":" ++ show goBars ++ ","
+                ++ "\"bpm\":" ++ show goBPM ++ ","
+                ++ "\"title\":\"" ++ escapeJson (songTitle song) ++ "\","
+                ++ "\"dsl\":\"" ++ escapeJson dslContent ++ "\""
+                ++ "}"
+        else do
+            putStrLn $ "[Sonora] Generating procedural music with seed " ++ show goSeed ++ "..."
+            case goOutput of
+                Just dslPath -> putStrLn $ "[Sonora] Saved procedural score to: " ++ dslPath
+                Nothing      -> return ()
+            case goRenderWav of
+                Just wavPath -> putStrLn $ "[Sonora] Render complete: " ++ wavPath
+                Nothing ->
+                    when (goOutput == Nothing) $ do
+                        let defPath = "procedural_seed_" ++ show goSeed ++ ".sonora"
+                        writeFile defPath dslContent
+                        putStrLn $ "[Sonora] Wrote score to default path: " ++ defPath
 
 runInspect :: InspectOptions -> IO ()
 runInspect InspectOptions{..} = do
     parsed <- parseSonoraFile ioInput
     case parsed of
         Left err -> do
-            hPutStrLn stderr $ "Syntax error: " ++ show err
-            exitFailure
+            if ioJson
+                then do
+                    let pos = errorPos err
+                        lineNo = sourceLine pos
+                        colNo  = sourceColumn pos
+                        msg    = show err
+                    putStrLn $ "{"
+                        ++ "\"status\":\"error\","
+                        ++ "\"line\":" ++ show lineNo ++ ","
+                        ++ "\"column\":" ++ show colNo ++ ","
+                        ++ "\"message\":\"" ++ escapeJson msg ++ "\""
+                        ++ "}"
+                    exitFailure
+                else do
+                    hPutStrLn stderr $ "Syntax error: " ++ show err
+                    exitFailure
         Right astSong -> do
             let song = evaluateSong astSong
-            putStrLn "=================================================="
-            putStrLn $ "  Title:          " ++ songTitle song
-            putStrLn $ "  Tempo:          " ++ show (getBPM (songBPM song)) ++ " BPM"
-            putStrLn $ "  Time Signature: " ++ show (tsNumerator (songTimeSig song))
-                     ++ "/" ++ show (tsDenominator (songTimeSig song))
-            putStrLn $ "  Track Count:    " ++ show (length (songTracks song))
-            putStrLn "--------------------------------------------------"
-            mapM_ inspectTrack (songTracks song)
-            putStrLn "=================================================="
+            if ioJson
+                then do
+                    let tList = intercalate "," (map trackJson (songTracks song))
+                    putStrLn $ "{"
+                        ++ "\"status\":\"ok\","
+                        ++ "\"title\":\"" ++ escapeJson (songTitle song) ++ "\","
+                        ++ "\"bpm\":" ++ show (getBPM (songBPM song)) ++ ","
+                        ++ "\"timeSignature\":\"" ++ show (tsNumerator (songTimeSig song))
+                        ++ "/" ++ show (tsDenominator (songTimeSig song)) ++ "\","
+                        ++ "\"trackCount\":" ++ show (length (songTracks song)) ++ ","
+                        ++ "\"tracks\":[" ++ tList ++ "]"
+                        ++ "}"
+                else do
+                    putStrLn "=================================================="
+                    putStrLn $ "  Title:          " ++ songTitle song
+                    putStrLn $ "  Tempo:          " ++ show (getBPM (songBPM song)) ++ " BPM"
+                    putStrLn $ "  Time Signature: " ++ show (tsNumerator (songTimeSig song))
+                             ++ "/" ++ show (tsDenominator (songTimeSig song))
+                    putStrLn $ "  Track Count:    " ++ show (length (songTracks song))
+                    putStrLn "--------------------------------------------------"
+                    mapM_ inspectTrack (songTracks song)
+                    putStrLn "=================================================="
   where
+    trackJson Track{..} =
+        let events = linearize noteDuration trackMusic
+            dur = musicDuration noteDuration trackMusic
+            sec = durationToSeconds (BPM 120) dur
+        in "{"
+            ++ "\"name\":\"" ++ escapeJson trackName ++ "\","
+            ++ "\"instrument\":\"" ++ escapeJson (instName trackInstrument) ++ "\","
+            ++ "\"notesCount\":" ++ show (length events) ++ ","
+            ++ "\"durationSeconds\":" ++ show sec
+            ++ "}"
+
     inspectTrack Track{..} = do
         let events = linearize noteDuration trackMusic
             dur = musicDuration noteDuration trackMusic
@@ -200,35 +282,70 @@ runInspect InspectOptions{..} = do
 
 runSynth :: SynthOptions -> IO ()
 runSynth SynthOptions{..} = do
-    let inst = fromMaybe defaultInstrument (lookupInstrument soPreset)
-    -- Parse simple notes string
-    let parsedNotes = parse (many (try (noteItem <* spaces))) "synth-cli" soNotes
-    case parsedNotes of
-        Left err -> do
-            hPutStrLn stderr $ "Error parsing note string: " ++ show err
-            exitFailure
-        Right notes -> do
-            let music = line notes
-            putStrLn $ "[Sonora] Synthesizing " ++ show (length notes) ++ " notes with " ++ soPreset ++ "..."
-            renderMusicToWAV soOutput (BPM 120) inst music
-            putStrLn $ "[Sonora] Exported to: " ++ soOutput
+    let baseInst = fromMaybe defaultInstrument (lookupInstrument soPreset)
+        baseVoice = instVoice baseInst
+        v1 = maybe baseVoice (\cut -> baseVoice { voiceFilterCutoff = cut }) soCutoff
+        v2 = maybe v1 (\r -> v1 { voiceFilterRes = r }) soResonance
+        origAmp = voiceAmpEnv v2
+        ampA = fromMaybe (adsrAttack origAmp) soAttack
+        ampD = fromMaybe (adsrDecay origAmp) soDecay
+        ampS = fromMaybe (adsrSustain origAmp) soSustain
+        ampR = fromMaybe (adsrRelease origAmp) soRelease
+        v3 = v2 { voiceAmpEnv = adsr ampA ampD ampS ampR }
+        inst = baseInst { instVoice = v3 }
+
+    case soNotes of
+        Just notesStr | not (null notesStr) -> do
+            let parsedNotes = parse (many (try (noteItem <* spaces))) "synth-cli" notesStr
+            case parsedNotes of
+                Left err -> do
+                    hPutStrLn stderr $ "Error parsing note string: " ++ show err
+                    exitFailure
+                Right notes -> do
+                    let music = line notes
+                    renderMusicToWAV soOutput (BPM 120) inst music
+        _ -> do
+            let parsedPitch = parse (pitchClassParser <* spaces) "pitch-cli" soPitch
+            case parsedPitch of
+                Left err -> do
+                    hPutStrLn stderr $ "Error parsing pitch '" ++ soPitch ++ "': " ++ show err
+                    exitFailure
+                Right pc -> do
+                    let dur = Duration (toRational soDuration / 2)
+                        music = Prim (note pc dur)
+                    renderMusicToWAV soOutput (BPM 120) inst music
   where
     noteItem = do
-        pc <- Sonora.c4 <$ string "C4" <|> Sonora.e4 <$ string "E4" <|> Sonora.g4 <$ string "G4"
-           <|> Sonora.a4 <$ string "A4" <|> Sonora.d4 <$ string "D4" <|> Sonora.b4 <$ string "B4"
-           <|> Sonora.f4 <$ string "F4"
+        pc <- pitchClassParser
         _ <- spaces
-        d <- Sonora.quarter <$ string "quarter" <|> Sonora.half <$ string "half" <|> Sonora.whole <$ string "whole"
-        return (Prim (note pc d))
+        durVal <- durationParser
+        return (Prim (note pc durVal))
 
 -- Helper to parse scale string "C-Major", "A-Minor", etc.
 parseScaleString :: String -> (PitchClass, ScaleType)
-parseScaleString str =
-    case break (== '-') str of
-        ("C", "-Major") -> (c4, Major)
-        ("A", "-Minor") -> (a4, NaturalMinor)
-        ("F", "-Major") -> (f4, Major)
-        ("G", "-Major") -> (g4, Major)
-        ("D", "-Dorian") -> (d4, Dorian)
-        ("E", "-Minor") -> (e4, NaturalMinor)
-        _               -> (c4, Major)
+parseScaleString rawStr =
+    case break (== '-') rawStr of
+        (rStr, '-' : tStr) ->
+            let root = case parse (pitchClassParser <* spaces) "root" (rStr ++ "4") of
+                    Right pVal -> pVal
+                    Left _  -> c4
+                sType = case tStr of
+                    "Major"           -> Major
+                    "NaturalMinor"    -> NaturalMinor
+                    "Minor"           -> NaturalMinor
+                    "HarmonicMinor"   -> HarmonicMinor
+                    "Dorian"          -> Dorian
+                    "Phrygian"        -> Phrygian
+                    "Lydian"          -> Lydian
+                    "Mixolydian"      -> Mixolydian
+                    "Aeolian"         -> NaturalMinor
+                    "Locrian"         -> Locrian
+                    "Pentatonic"      -> MajorPentatonic
+                    "PentatonicMajor" -> MajorPentatonic
+                    "PentatonicMinor" -> MinorPentatonic
+                    "MajorPentatonic" -> MajorPentatonic
+                    "MinorPentatonic" -> MinorPentatonic
+                    "Blues"           -> Blues
+                    _                 -> Major
+            in (root, sType)
+        _ -> (c4, Major)

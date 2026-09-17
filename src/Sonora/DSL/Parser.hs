@@ -2,6 +2,8 @@
 module Sonora.DSL.Parser
     ( parseSonora
     , parseSonoraFile
+    , pitchClassParser
+    , durationParser
     ) where
 
 import Control.Monad (void)
