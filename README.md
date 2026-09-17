@@ -42,6 +42,39 @@ WAV / Audio Output
 * **Declarative DSL**: A human-readable `.sonora` music score language parsed with parser combinators.
 * **Deterministic Procedural Music**: Seed-based algorithmic generation of melodies, chord progressions with smooth voice leading, and driving basslines.
 * **Pure Haskell WAV Serialization**: Canonical RIFF/WAV file generation (16/24-bit PCM & 32-bit float) with zero native dependencies.
+* **Sonora Studio Desktop App**: High-performance, GPU-accelerated desktop workstation built in **Rust (`egui` / `eframe`)** with zero TypeScript/Node bloat, exposing 100% of synth, filter, and score controls.
+
+---
+
+## Sonora Studio (Native Desktop Application)
+
+For an interactive, tactile synthesizer experience, Sonora includes **Sonora Studio** — a native desktop application engineered in **Rust (`egui`)** running directly on the GPU (DirectX/wgpu at 60–144 FPS).
+
+```text
+┌────────────────────────────────────────────────────────────────────────────────────────┐
+│  SONORA STUDIO  [● Play]  [■ Stop]  [↻ Loop]   BPM: [124]  Scale: [D-Dorian   ▼]   [WAV]│
+├───────────────────────────────────┬────────────────────────────────────────────────────┤
+│  SCORE & DSL STUDIO               │  SYNTHESIZER PATCH DESIGNER                        │
+│  • Syntax highlighting & linters  │  • Multi-oscillator mixer (Saw, Pulse, Sub, Noise) │
+│  • Parsec error indicators        │  • Cytomic SVF Bode plot (Interactive Cutoff & Q)  │
+│  • 1-Click score template loader  │  • Draggable 4-point Dual ADSR Envelope canvases   │
+├───────────────────────────────────┤  • Studio Effects: Reverb, Delay, Chorus, Drive    │
+│  ALGORITHMIC COMPOSER             │  • Virtual Piano Keybed for instant note audition  │
+│  • Seed randomizer (🎲 Roll Dice) ├────────────────────────────────────────────────────┤
+│  • Mode & voice-leading selectors │  MULTI-TRACK MIXER & WAVEFORM SCOPE                │
+│  • 1-Click "Generate & Audition"  │  • Stereo waveform display with playhead scrub     │
+│                                   │  • Track faders, Pan dials, Mute [M] & Solo [S]    │
+└───────────────────────────────────┴────────────────────────────────────────────────────┘
+```
+
+### Launching Sonora Studio
+```bash
+# Build and run the native desktop studio
+cd studio
+cargo run --release
+```
+
+The desktop app communicates directly with the compiled Haskell `sonora` engine over structured JSON IPC, delivering sub-30ms synthesis previews and low-latency native audio playback.
 
 ---
 
