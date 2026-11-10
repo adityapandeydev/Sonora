@@ -9,6 +9,10 @@ maintainer:         sonora@example.com
 category:           Sound, Music, DSP
 build-type:         Simple
 extra-doc-files:    README.md
+extra-source-files:
+    cbits/sonora_audio.h
+    cbits/miniaudio/miniaudio.h
+    cbits/miniaudio/LICENSE
 
 common common-options
     default-language:   Haskell2010
@@ -63,6 +67,15 @@ library
         Sonora.Generate.Melody
         Sonora.Generate.Progression
         Sonora.Generate.Procedural
+        Sonora.Audio.Backend
+        Sonora.Audio.Device
+        Sonora.Audio.Fake
+    -- Audio output: miniaudio 0.11.25 (public domain / MIT-0), compiled in.
+    c-sources:          cbits/sonora_audio.c
+    include-dirs:       cbits
+    cc-options:         -O2
+    if !os(windows)
+        extra-libraries: pthread m dl
     build-depends:
         base >= 4.14 && < 5,
         binary >= 0.8,
@@ -107,6 +120,7 @@ test-suite sonora-test
         SignalSpec
         ParserSpec
         DeterminismSpec
+        AudioSpec
     build-depends:
         base,
         sonora,

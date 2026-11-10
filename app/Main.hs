@@ -6,15 +6,18 @@ import Data.List (intercalate)
 import Data.Maybe (fromMaybe)
 import Data.Word (Word64)
 import Options.Applicative hiding (many)
-import System.Directory (getTemporaryDirectory)
+import Control.Concurrent (threadDelay)
+import Control.Exception (evaluate)
 import System.Exit (exitFailure)
-import System.FilePath ((</>), replaceExtension, takeBaseName)
-import System.IO (hPutStrLn, stderr)
-import System.Process (callCommand)
+import System.FilePath (replaceExtension)
+import System.IO (hFlush, hPutStr, hPutStrLn, hSetEncoding, stderr, stdout, utf8)
 import Text.Parsec (parse, spaces, try, many, errorPos)
 import Text.Parsec.Pos (sourceLine, sourceColumn)
 
+import qualified Data.Vector.Storable as V
 import Sonora
+import Sonora.Audio.Backend
+import Sonora.Audio.Device (withDeviceBackend)
 
 -- | CLI Subcommands
 data Command
@@ -34,6 +37,7 @@ data RenderOptions = RenderOptions
 data PlayOptions = PlayOptions
     { poInput      :: !FilePath
     , poSampleRate :: !Int
+    , poMaxSeconds :: !(Maybe Double)
     }
 
 data GenerateOptions = GenerateOptions
@@ -76,7 +80,8 @@ renderParser = CmdRender <$> (RenderOptions
 playParser :: Parser Command
 playParser = CmdPlay <$> (PlayOptions
     <$> strArgument (metavar "INPUT" <> help "Path to .sonora score file to render and play")
-    <*> option auto (long "sample-rate" <> value 44100 <> showDefault <> help "Sample rate in Hz"))
+    <*> option auto (long "sample-rate" <> value 44100 <> showDefault <> help "Sample rate in Hz")
+    <*> optional (option auto (long "max-seconds" <> metavar "SECONDS" <> help "Stop playback after this many seconds")))
 
 generateParser :: Parser Command
 generateParser = CmdGenerate <$> (GenerateOptions
@@ -110,7 +115,7 @@ synthParser = CmdSynth <$> (SynthOptions
 cliParser :: Parser Command
 cliParser = subparser
     (  command "render"   (info renderParser   (progDesc "Render a .sonora file to WAV audio"))
-    <> command "play"     (info playParser     (progDesc "Render and immediately play a .sonora file"))
+    <> command "play"     (info playParser     (progDesc "Render a .sonora file and play it on the default audio device"))
     <> command "generate" (info generateParser (progDesc "Procedurally generate a deterministic score and/or WAV"))
     <> command "inspect"  (info inspectParser  (progDesc "Inspect score structure, tracks, duration, and metadata"))
     <> command "synth"    (info synthParser    (progDesc "Quickly synthesize a sequence of notes to WAV"))
@@ -125,6 +130,10 @@ cliInfo = info (cliParser <**> helper)
 
 main :: IO ()
 main = do
+    -- Console code pages on Windows are often not UTF-8; force it so help
+    -- text and JSON output never fail to encode when stdout is a pipe.
+    hSetEncoding stdout utf8
+    hSetEncoding stderr utf8
     cmd <- execParser cliInfo
     case cmd of
         CmdRender ro   -> runRender ro
@@ -169,12 +178,46 @@ runRender RenderOptions{..} = do
 
 runPlay :: PlayOptions -> IO ()
 runPlay PlayOptions{..} = do
-    tempDir <- getTemporaryDirectory
-    let tempWav = tempDir </> (takeBaseName poInput ++ "_preview.wav")
-    runRender (RenderOptions poInput (Just tempWav) poSampleRate "16")
-    putStrLn $ "[Sonora] Playing preview via system audio player..."
-    let playCmd = "powershell -c \"(New-Object Media.SoundPlayer '" ++ tempWav ++ "').PlaySync()\""
-    callCommand playCmd
+    putStrLn $ "[Sonora] Parsing score: " ++ poInput
+    parsed <- parseSonoraFile poInput
+    astSong <- either (\err -> hPutStrLn stderr ("Syntax error: " ++ show err) >> exitFailure) return parsed
+    let song = evaluateSong astSong
+        cfg = defaultConfig { configSampleRate = poSampleRate }
+        frames = runSignal (normalizeSignal 0.95 (renderSong song)) cfg
+        total = V.length frames
+        limit = maybe total (\s -> min total (max 0 (round (s * fromIntegral poSampleRate)))) poMaxSeconds
+        seconds :: Int -> Double
+        seconds n = fromIntegral n / fromIntegral poSampleRate
+    putStrLn $ "[Sonora] Rendering '" ++ songTitle song ++ "'..."
+    _ <- evaluate (V.length frames)
+    result <- withDeviceBackend poSampleRate $ \backend -> do
+        putStrLn $ "[Sonora] Output: " ++ backendDescription backend
+        backendLoad backend SongVoice frames
+        backendSetPlaying backend SongVoice True
+        let loop = do
+                threadDelay 50000
+                st <- backendStatus backend SongVoice
+                lost <- backendDeviceLost backend
+                hPutStr stdout $ "\r[Sonora] " ++ showFixed (seconds (fromIntegral (statusPosition st)))
+                              ++ " / " ++ showFixed (seconds total) ++ " s"
+                hFlush stdout
+                if lost
+                    then return (Just "audio device was lost during playback")
+                    else if statusPlaying st && fromIntegral (statusPosition st) < limit
+                        then loop
+                        else Nothing <$ backendSetPlaying backend SongVoice False
+        loop
+    putStrLn ""
+    case result of
+        Left err -> do
+            hPutStrLn stderr $ "[Sonora] Audio output unavailable: " ++ audioErrorMessage err
+            exitFailure
+        Right (Just problem) -> do
+            hPutStrLn stderr $ "[Sonora] Playback stopped: " ++ problem
+            exitFailure
+        Right Nothing -> putStrLn "[Sonora] Playback finished."
+  where
+    showFixed x = let t = fromIntegral (round (x * 10) :: Int) / 10 :: Double in show t
 
 runGenerate :: GenerateOptions -> IO ()
 runGenerate GenerateOptions{..} = do
