@@ -63,6 +63,11 @@ library
         Sonora.Generate.Melody
         Sonora.Generate.Progression
         Sonora.Generate.Procedural
+        Sonora.Synth.Patch
+        Sonora.Project.Types
+        Sonora.Project.Score
+        Sonora.Project.Update
+        Sonora.Project.Compile
         Sonora.Audio.Backend
         Sonora.Audio.Mixer
         Sonora.Audio.Device
@@ -138,6 +143,7 @@ test-suite sonora-test
         DeterminismSpec
         AudioSpec
         ServiceSpec
+        ProjectSpec
     build-tool-depends:
         sonora:sonora-service
     build-depends:
@@ -145,6 +151,7 @@ test-suite sonora-test
         sonora,
         aeson,
         bytestring,
+        containers,
         directory,
         process,
         QuickCheck >= 2.14,
