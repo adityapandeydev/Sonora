@@ -42,39 +42,7 @@ WAV / Audio Output
 * **Declarative DSL**: A human-readable `.sonora` music score language parsed with parser combinators.
 * **Deterministic Procedural Music**: Seed-based algorithmic generation of melodies, chord progressions with smooth voice leading, and driving basslines.
 * **Pure Haskell WAV Serialization**: Canonical RIFF/WAV file generation (16/24-bit PCM & 32-bit float) with zero native dependencies.
-* **Sonora Studio Desktop App**: High-performance, GPU-accelerated desktop workstation built in **Rust (`egui` / `eframe`)** with zero TypeScript/Node bloat, exposing 100% of synth, filter, and score controls.
-
----
-
-## Sonora Studio (Native Desktop Application)
-
-For an interactive, tactile synthesizer experience, Sonora includes **Sonora Studio** — a native desktop application engineered in **Rust (`egui`)** running directly on the GPU (DirectX/wgpu at 60–144 FPS).
-
-```text
-┌────────────────────────────────────────────────────────────────────────────────────────┐
-│  SONORA STUDIO  [● Play]  [■ Stop]  [↻ Loop]   BPM: [124]  Scale: [D-Dorian   ▼]   [WAV]│
-├───────────────────────────────────┬────────────────────────────────────────────────────┤
-│  SCORE & DSL STUDIO               │  SYNTHESIZER PATCH DESIGNER                        │
-│  • Syntax highlighting & linters  │  • Multi-oscillator mixer (Saw, Pulse, Sub, Noise) │
-│  • Parsec error indicators        │  • Cytomic SVF Bode plot (Interactive Cutoff & Q)  │
-│  • 1-Click score template loader  │  • Draggable 4-point Dual ADSR Envelope canvases   │
-├───────────────────────────────────┤  • Studio Effects: Reverb, Delay, Chorus, Drive    │
-│  ALGORITHMIC COMPOSER             │  • Virtual Piano Keybed for instant note audition  │
-│  • Seed randomizer (🎲 Roll Dice) ├────────────────────────────────────────────────────┤
-│  • Mode & voice-leading selectors │  MULTI-TRACK MIXER & WAVEFORM SCOPE                │
-│  • 1-Click "Generate & Audition"  │  • Stereo waveform display with playhead scrub     │
-│                                   │  • Track faders, Pan dials, Mute [M] & Solo [S]    │
-└───────────────────────────────────┴────────────────────────────────────────────────────┘
-```
-
-### Launching Sonora Studio
-```bash
-# Build and run the native desktop studio
-cd studio
-cargo run --release
-```
-
-The desktop app communicates directly with the compiled Haskell `sonora` engine over structured JSON IPC, delivering sub-30ms synthesis previews and low-latency native audio playback.
+* **Haskell Audio Playback**: Mixing, transport (play, pause, sample-accurate seek and looping), smoothed gain, and separate song and audition voices are implemented in Haskell. On Windows, finished sample blocks go to the system audio engine through a direct FFI binding to WASAPI, with no third-party native code.
 
 ---
 
@@ -83,6 +51,7 @@ The desktop app communicates directly with the compiled Haskell `sonora` engine 
 ### Prerequisites
 * GHC 9.4+ (or GHC 9.10+)
 * Cabal 3.8+
+* Windows 10 or later (x86_64) for audio playback; rendering and the rest of the library work on any GHC platform
 
 ```bash
 # Update cabal package database
@@ -133,10 +102,14 @@ cabal run sonora -- synth --preset lead -n "C4 quarter E4 quarter G4 half" -o te
 ```
 
 ### 5. Playback
-Render and immediately preview through your system audio player:
+Render a score and play it on the default audio output device:
 ```bash
 cabal run sonora -- play examples/synthwave.sonora
+
+# Stop after a fixed time (useful for quick device checks)
+cabal run sonora -- play examples/synthwave.sonora --max-seconds 3
 ```
+The command exits with a non-zero status and a message if no output device is available or the device disappears during playback.
 
 ---
 
@@ -240,6 +213,7 @@ sonora/
 │   ├── Sonora/Signal/           # Oscillators, envelopes, SVF filter, effects
 │   ├── Sonora/Synth/            # Subtractive voices and instrument presets
 │   ├── Sonora/Render/           # RIFF WAV encoder and multi-track engine
+│   ├── Sonora/Audio/            # Realtime mixer, transport model, WASAPI driver, test fake
 │   ├── Sonora/DSL/              # Lexer, Parsec parser, AST, and evaluator
 │   └── Sonora/Generate/         # Deterministic PRNG and algorithmic generators
 ├── test/                        # QuickCheck property and unit test suites
@@ -263,3 +237,4 @@ Verified properties include:
 - **Monoid Laws**: Identity and associativity for composition and signals.
 - **DSP Bounded Amplitudes**: Numerical range limits and Cytomic SVF stability.
 - **Deterministic Reproducibility**: Bit-identical audio vectors from identical seeds.
+- **Transport Model**: The realtime mixer's output matches the reference transport model sample for sample (seek, loop, end of buffer) for arbitrary device period sizes.
