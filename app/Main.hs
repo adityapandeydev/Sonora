@@ -206,7 +206,13 @@ runPlay PlayOptions{..} = do
                     else if statusPlaying st && fromIntegral (statusPosition st) < limit
                         then loop
                         else Nothing <$ backendSetPlaying backend SongVoice False
-        loop
+        outcome <- loop
+        -- Let audio already queued on the device reach the speaker.
+        threadDelay (backendLatencyFrames backend * 1000000 `div` poSampleRate)
+        dropouts <- backendUnderruns backend
+        when (dropouts > 0) $
+            hPutStrLn stderr $ "\n[Sonora] Warning: " ++ show dropouts ++ " audio dropout(s) during playback"
+        return outcome
     putStrLn ""
     case result of
         Left err -> do

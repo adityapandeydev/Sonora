@@ -9,10 +9,6 @@ maintainer:         sonora@example.com
 category:           Sound, Music, DSP
 build-type:         Simple
 extra-doc-files:    README.md
-extra-source-files:
-    cbits/sonora_audio.h
-    cbits/miniaudio/miniaudio.h
-    cbits/miniaudio/LICENSE
 
 common common-options
     default-language:   Haskell2010
@@ -68,16 +64,19 @@ library
         Sonora.Generate.Progression
         Sonora.Generate.Procedural
         Sonora.Audio.Backend
+        Sonora.Audio.Mixer
         Sonora.Audio.Device
         Sonora.Audio.Fake
-    -- Audio output: miniaudio 0.11.25 (public domain / MIT-0), compiled in.
-    c-sources:          cbits/sonora_audio.c
-    include-dirs:       cbits
-    cc-options:         -O2
-    if !os(windows)
-        extra-libraries: pthread m dl
+        Sonora.Service.Protocol
+        Sonora.Service.Server
+        Sonora.Service.Methods
+    -- Audio device access: WASAPI through direct FFI to Windows system DLLs.
+    if os(windows)
+        other-modules:   Sonora.Audio.Wasapi
+        extra-libraries: ole32
     build-depends:
         base >= 4.14 && < 5,
+        aeson >= 2.0 && < 2.3,
         binary >= 0.8,
         bytestring >= 0.10,
         containers >= 0.6,
@@ -105,6 +104,23 @@ executable sonora
         process,
         text,
         vector
+    ghc-options:
+        -rtsopts
+        -threaded
+        "-with-rtsopts=-N"
+
+executable sonora-service
+    import:             common-options
+    main-is:            Main.hs
+    hs-source-dirs:     service
+    other-modules:      Paths_sonora
+    autogen-modules:    Paths_sonora
+    build-depends:
+        base,
+        sonora,
+        containers,
+        optparse-applicative >= 0.16,
+        text
     ghc-options:
         -rtsopts
         -threaded

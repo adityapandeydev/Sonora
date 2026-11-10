@@ -8,8 +8,8 @@
 -- measured in frames of the loaded buffer at 'backendSampleRate'.
 --
 -- 'advanceVoice' is the reference model of how a voice moves through its
--- buffer. The native device ("Sonora.Audio.Device") and the deterministic
--- test backend ("Sonora.Audio.Fake") both follow it.
+-- buffer. The realtime mixer ("Sonora.Audio.Mixer"), which feeds both the
+-- device and the deterministic test backend, follows it.
 module Sonora.Audio.Backend
     ( Voice (..)
     , voiceIndex
@@ -23,6 +23,7 @@ module Sonora.Audio.Backend
     , setPlayingModel
     , seekModel
     , setLoopModel
+    , activeLoop
     , advanceVoice
     , voiceModelStatus
       -- * Buffer conversion
@@ -80,6 +81,11 @@ data AudioBackend = AudioBackend
     , backendStatus        :: Voice -> IO VoiceStatus
       -- | True once the device stopped without being asked to.
     , backendDeviceLost    :: IO Bool
+      -- | Frames queued ahead of the speaker. Voice positions run this far
+      -- ahead of what is audible; wait this long before closing to drain.
+    , backendLatencyFrames :: !Int
+      -- | Times the device ran out of queued audio (audible dropouts).
+    , backendUnderruns     :: IO Int
     , backendClose         :: IO ()
     }
 
