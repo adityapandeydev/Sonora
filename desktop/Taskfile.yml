@@ -1,0 +1,61 @@
+version: '3'
+
+# Windows is the only verified platform. Run tasks with `wails3 task <name>`.
+
+vars:
+  APP_NAME: "desktop"
+  BIN_DIR: "bin"
+  PACKAGE_MANAGER: "npm"
+  VITE_PORT: '{{.WAILS_VITE_PORT | default 9245}}'
+
+includes:
+  common: ./build/Taskfile.yml
+  windows: ./build/windows/Taskfile.yml
+
+tasks:
+  engine:
+    summary: Builds the Haskell engine (sonora-service) and places it next to the host binary
+    dir: ..
+    cmds:
+      - cabal build exe:sonora-service
+      - powershell -NoProfile -Command "New-Item -ItemType Directory -Force '{{.ROOT_DIR}}/{{.BIN_DIR}}' | Out-Null; Copy-Item -Force (cabal list-bin sonora-service) '{{.ROOT_DIR}}/{{.BIN_DIR}}/sonora-service.exe'"
+
+  build:
+    summary: Builds the engine and the desktop host
+    cmds:
+      - task: engine
+      - task: windows:build
+
+  package:
+    summary: Packages a production build
+    cmds:
+      - task: windows:package
+
+  run:
+    summary: Runs the built application
+    cmds:
+      - task: windows:run
+
+  dev:
+    summary: Runs the application in development mode
+    cmds:
+      - wails3 dev -config ./build/config.yml -port {{.VITE_PORT}}
+
+  test:
+    summary: Runs host tests (with the race detector) and frontend type checks
+    cmds:
+      - task: engine
+      - cmd: go test -race -count=1 ./...
+        env:
+          CGO_ENABLED: "1"
+          SONORA_SERVICE_EXE: '{{.ROOT_DIR}}/{{.BIN_DIR}}/sonora-service.exe'
+      - task: typecheck
+
+  typecheck:
+    summary: Type-checks the frontend
+    dir: frontend
+    deps:
+      - task: common:install:frontend:deps
+      - task: common:generate:bindings
+    cmds:
+      - npm run typecheck

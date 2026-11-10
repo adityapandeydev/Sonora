@@ -1,0 +1,21 @@
+/* Minimal readable defaults for the connection placeholder only. */
+:root {
+  color-scheme: light dark;
+  font-family: system-ui, sans-serif;
+}
+
+main {
+  padding: 2rem;
+  max-width: 40rem;
+}
+
+.detail {
+  font-family: ui-monospace, monospace;
+  font-size: 0.875rem;
+  white-space: pre-wrap;
+}
+
+.actions {
+  display: flex;
+  gap: 0.5rem;
+}
