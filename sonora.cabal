@@ -137,9 +137,18 @@ test-suite sonora-test
         ParserSpec
         DeterminismSpec
         AudioSpec
+        ServiceSpec
+    build-tool-depends:
+        sonora:sonora-service
     build-depends:
         base,
         sonora,
+        aeson,
         bytestring,
+        directory,
+        process,
         QuickCheck >= 2.14,
+        text,
         vector
+    ghc-options:
+        -threaded

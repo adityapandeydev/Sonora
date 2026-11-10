@@ -197,7 +197,7 @@ runServer cfg input output = do
         loop = do
             line <- nextLine
             case line of
-                EndOfLine -> do
+                InputClosed -> do
                     n <- stopAll ShuttingDown "Input closed"
                     logMsg ("input closed; stopped " <> T.pack (show n) <> " in-flight request(s)")
                     return EndOfInput
@@ -221,7 +221,7 @@ runServer cfg input output = do
 data InputLine
     = Line !BS.ByteString  -- ^ One message, without its line terminator.
     | Oversized            -- ^ A line over the limit was skipped.
-    | EndOfLine            -- ^ Input closed.
+    | InputClosed            -- ^ Input closed.
     deriving (Eq, Show)
 
 -- | Read newline-terminated messages of at most the given size. Oversized
@@ -251,7 +251,7 @@ newLineReader h maxBytes = do
         accumulate acc len = do
             chunk <- BS.hGetSome h chunkSize
             if BS.null chunk
-                then return $ if len == 0 then EndOfLine else finish (BS.concat (reverse acc))
+                then return $ if len == 0 then InputClosed else finish (BS.concat (reverse acc))
                 else case BC.elemIndex '\n' chunk of
                     Just i -> do
                         writeIORef pending (BS.drop (i + 1) chunk)

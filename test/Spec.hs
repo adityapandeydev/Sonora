@@ -6,6 +6,7 @@ import SignalSpec (signalTests)
 import ParserSpec (parserTests)
 import DeterminismSpec (determinismTests)
 import AudioSpec (audioTests)
+import ServiceSpec (serviceTests)
 
 main :: IO ()
 main = do
@@ -21,8 +22,10 @@ main = do
     p4 <- determinismTests
     putStrLn ""
     p5 <- audioTests
+    putStrLn ""
+    p6 <- serviceTests
     putStrLn "========================================================"
-    if p1 && p2 && p3 && p4 && p5
+    if p1 && p2 && p3 && p4 && p5 && p6
         then do
             putStrLn "  ALL TEST SUITES PASSED SUCCESSFULLY! (100%)"
             putStrLn "========================================================"
