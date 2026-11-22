@@ -6,6 +6,7 @@
 -- system. On Windows the driver is WASAPI ("Sonora.Audio.Wasapi").
 module Sonora.Audio.Device
     ( openDeviceBackend
+    , openDeviceBackendWith
     , withDeviceBackend
     , defaultBufferMillis
     ) where
@@ -26,17 +27,22 @@ defaultBufferMillis = 100
 -- | Open the default output device. Buffers passed to the backend are
 -- interpreted at the given sample rate; the system converts to the device rate.
 openDeviceBackend :: Int -> IO (Either AudioError AudioBackend)
-openDeviceBackend sampleRate
+openDeviceBackend = openDeviceBackendWith defaultBufferMillis
+
+-- | Open the default output device with a given amount of audio queued ahead.
+openDeviceBackendWith :: Int -> Int -> IO (Either AudioError AudioBackend)
+openDeviceBackendWith bufferMillis sampleRate
     | sampleRate <= 0 = return (Left (AudioError (-2) "Sample rate must be positive"))
 #if defined(mingw32_HOST_OS)
     | otherwise = do
         mixer <- newMixer sampleRate
-        result <- openWasapi defaultBufferMillis mixer
+        result <- openWasapi bufferMillis mixer
         case result of
             Left err -> return (Left err)
             Right out -> Right <$> mixerBackend mixer
                 ("WASAPI: " ++ wasapiDeviceName out)
                 (wasapiBufferFrames out)
+                (wasapiPlayed out)
                 (wasapiLost out)
                 (wasapiUnderruns out)
                 (wasapiClose out)

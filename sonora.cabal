@@ -50,6 +50,7 @@ library
         Sonora.Signal.Envelope
         Sonora.Signal.Filter
         Sonora.Signal.Effects
+        Sonora.Signal.Waveform
         Sonora.Synth.Voice
         Sonora.Synth.Instrument
         Sonora.Synth.Synthesizer

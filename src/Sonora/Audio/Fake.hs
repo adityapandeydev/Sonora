@@ -5,6 +5,7 @@
 module Sonora.Audio.Fake
     ( FakeAudio (..)
     , newFakeAudio
+    , newFakeAudioWith
     ) where
 
 import Control.Monad (unless)
@@ -32,11 +33,20 @@ data FakeAudio = FakeAudio
     }
 
 newFakeAudio :: Int -> IO FakeAudio
-newFakeAudio sampleRate = do
-    mixer <- newMixer sampleRate
+newFakeAudio sampleRate = newFakeAudioWith sampleRate (defaultFadeFrames sampleRate) 0
+
+-- | A fake with a given fade length and a device that plays frames the given
+-- number of frames after they are rendered.
+newFakeAudioWith :: Int -> Int -> Int -> IO FakeAudio
+newFakeAudioWith sampleRate fade latency = do
+    mixer <- newMixerWith sampleRate fade
     lost <- newIORef False
     closed <- newIORef False
-    backend <- mixerBackend mixer "fake" 0 (readIORef lost) (return 0) (writeIORef closed True)
+    let played = do
+            rendered <- mixerRenderedFrames mixer
+            let ahead = fromIntegral latency
+            return (if rendered > ahead then rendered - ahead else 0)
+    backend <- mixerBackend mixer "fake" latency played (readIORef lost) (return 0) (writeIORef closed True)
     let render n = do
             l <- readIORef lost
             c <- readIORef closed

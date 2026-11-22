@@ -53,7 +53,7 @@ main = do
             , configServiceVersion  = T.pack (showVersion version)
             , configMethods         = methods
               -- Session operations change shared state; apply them in order.
-            , configSerialMethods   = Map.keysSet (applicationMethods session)
+            , configSerialMethods   = serialMethods
             , configLog             = logLine
             }
     _ <- runServer cfg stdin stdout `finally` closeSession session

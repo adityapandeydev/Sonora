@@ -1,7 +1,7 @@
 module AudioSpec (audioTests) where
 
 import Control.Monad (forM)
-import Data.Word (Word32)
+import Data.Word (Word32, Word64)
 import Test.QuickCheck
 import Test.QuickCheck.Monadic (assert, monadicIO, run)
 import qualified Data.Vector.Storable as V
@@ -9,6 +9,7 @@ import qualified Data.Vector.Storable as V
 import Sonora.Audio.Backend
 import Sonora.Audio.Fake
 import Sonora.Signal.Core (Frame (..))
+import Sonora.Signal.Waveform (waveformPeaks)
 
 -- | Voice states reachable through the public operations, including loop
 -- ranges that are inverted or extend past the buffer.
@@ -55,10 +56,11 @@ prop_mixerMatchesModel =
     forAll genVoiceModel $ \vm ->
     forAll genChunks $ \chunks -> monadicIO $ do
         let len = fromIntegral (vmLength vm) :: Int
-            sample i = fromIntegral i / 1024 :: Double
-            buffer = V.generate len (\i -> Frame (sample i) (negate (sample i)))
+            sampleAt :: Int -> Double
+            sampleAt i = fromIntegral i / 1024
+            buffer = V.generate len (\i -> Frame (sampleAt i) (negate (sampleAt i)))
         (out, st) <- run $ do
-            fake <- newFakeAudio 44100
+            fake <- newFakeAudioWith 44100 0 0  -- fades off: samples pass through exactly
             let b = fakeBackend fake
             backendLoad b SongVoice buffer
             backendSetLoop b SongVoice (vmLoop vm)
@@ -67,15 +69,74 @@ prop_mixerMatchesModel =
             blocks <- mapM (fakeRender fake . fromIntegral) chunks
             st <- backendStatus b SongVoice
             return (V.concat blocks, st)
-        let total = sum (map fromIntegral chunks) :: Int
-            models = take total (iterate (advanceVoice 1) vm)
+        let frameTotal = sum (map fromIntegral chunks) :: Int
+            models = take frameTotal (iterate (advanceVoice 1) vm)
             expected = V.fromList $ concatMap
                 (\m -> if vmPlaying m
-                          then let x = realToFrac (sample (fromIntegral (vmPosition m))) in [x, negate x]
+                          then let x = realToFrac (sampleAt (fromIntegral (vmPosition m))) in [x, negate x]
                           else [0, 0])
                 models
             final = foldl (\m c -> advanceVoice (fromIntegral c) m) vm chunks
         assert (out == expected && st == voiceModelStatus final)
+
+-- | Control operations for 'prop_heardPosition'.
+data Op = OpPlay Bool | OpSeek Word64 | OpLoop (Maybe (Word64, Word64)) | OpReplace Word64
+    deriving Show
+
+genOp :: Gen Op
+genOp = oneof
+    [ OpPlay <$> arbitrary
+    , OpSeek <$> pos
+    , OpLoop <$> oneof [return Nothing, Just <$> ((,) <$> pos <*> pos)]
+    , OpReplace <$> pos ]
+  where pos = fromIntegral <$> choose (0 :: Int, 420)
+
+-- | After any sequence of operations and block sizes, the heard position is
+-- the one a frame-by-frame reference put at the output frame the device is
+-- playing, or the target of a load or seek that is not audible yet.
+prop_heardPosition :: Property
+prop_heardPosition =
+    forAll (choose (1, 500)) $ \latency ->
+    forAll (listOf1 ((,) <$> genOp <*> choose (1 :: Int, 300))) $ \steps -> monadicIO $ do
+        ok <- run $ do
+            fake <- newFakeAudioWith 44100 8 latency
+            let b = fakeBackend fake
+            backendLoad b SongVoice (silence 400)
+            backendSetPlaying b SongVoice True
+            let start = setPlayingModel True (loadVoiceModel 400 emptyVoiceModel)
+                -- Model, generation and its start, and what each rendered
+                -- frame was (newest first).
+                loop _ [] = return True
+                loop (m, gen, genStart, trace) ((op, n) : rest) = do
+                    (m', gen', genStart') <- case op of
+                        OpPlay p -> do
+                            backendSetPlaying b SongVoice p
+                            return (setPlayingModel p m, gen, genStart)
+                        OpSeek p -> do
+                            backendSeek b SongVoice p
+                            let m1 = seekModel p m
+                            return (m1, gen + 1 :: Int, vmPosition m1)
+                        OpLoop l -> do
+                            backendSetLoop b SongVoice l
+                            return (setLoopModel l m, gen, genStart)
+                        OpReplace len -> do
+                            backendReplace b SongVoice (silence (fromIntegral len))
+                            return (replaceVoiceModel len m, gen, genStart)
+                    fakeAdvance fake n
+                    let models = take n (iterate (advanceVoice 1) m')
+                        trace' = reverse [ (gen', vmPosition x) | x <- models ] ++ trace
+                        final = advanceVoice (fromIntegral n) m'
+                        played = max 0 (length trace' - latency)
+                        expected = min (vmLength final) $ case drop (length trace' - 1 - played) trace' of
+                            (g, p) : _ | g == gen' -> p
+                            _ -> genStart'
+                    heard <- backendHeard b SongVoice
+                    status <- backendStatus b SongVoice
+                    if heardPosition heard == expected && statusPosition status == vmPosition final
+                        then loop (final, gen', genStart', trace') rest
+                        else return False
+            loop (start, 0, 0, []) steps
+        assert ok
 
 silence :: Int -> V.Vector Frame
 silence n = V.replicate n (Frame 0 0)
@@ -178,12 +239,65 @@ fakeScenarios = sequence
         backendSetPlaying b AuditionVoice True
         out <- fakeRender fake 10
         check "Voices sum and output is clamped" (V.all (\x -> abs x == 1) out)
+
+    , do
+        -- Each cut jumps between +0.8 and -0.8: an unfaded cut steps by 1.6
+        -- (0.8 for pause). Faded over 4 ms, no step exceeds 0.02.
+        let hilo = V.generate 40000 (\i -> let x = if i < 20000 then 0.8 else -0.8 in Frame x x)
+            low = V.replicate 40000 (Frame (-0.8) (-0.8))
+            cuts =
+                [ ("pause", \b -> backendSetPlaying b SongVoice False)
+                , ("seek", \b -> backendSeek b SongVoice 30000)
+                , ("load", \b -> backendLoad b SongVoice low)
+                , ("replace", \b -> backendReplace b SongVoice low)
+                , ("loop wrap", \b -> backendSetLoop b SongVoice (Just (25000, 35000)) >> backendSeek b SongVoice 34900)
+                , ("loop wrap to other level", \b -> backendSetLoop b SongVoice (Just (5000, 15000)) >> backendSeek b SongVoice 14990)
+                , ("stop", \b -> backendSetPlaying b SongVoice False >> backendSeek b SongVoice 0)
+                , ("rapid seeks", \b -> mapM_ (backendSeek b SongVoice) [30000, 1000, 31000, 2000])
+                ]
+            biggestStep fade act = do
+                fake <- newFakeAudioWith 44100 fade 0
+                let b = fakeBackend fake
+                backendLoad b SongVoice hilo
+                backendSetPlaying b SongVoice True
+                before <- fakeRender fake 1000
+                _ <- act b
+                after <- fakeRender fake 2000
+                let xs = V.toList (V.ifilter (\i _ -> even i) (before V.++ after))
+                return (maximum (zipWith (\x y -> abs (x - y)) (drop 1 xs) xs))
+        faded <- mapM (\(n, act) -> (,) n <$> biggestStep 176 act) cuts
+        raw <- biggestStep 0 (\b -> backendSeek b SongVoice 30000)
+        let bad = [ (n, s) | (n, s) <- faded, s > 0.02 ]
+        mapM_ (\(n, s) -> putStrLn ("    step at " ++ n ++ ": " ++ show s)) bad
+        check "Pause, seek, load, replace, loop wrap, and stop do not click" (null bad && raw > 1.5)
+
+    , scenario $ \fake b -> do
+        backendLoad b SongVoice (silence 1000)
+        backendSetLoop b SongVoice (Just (200, 400))
+        backendSeek b SongVoice 300
+        backendSetPlaying b SongVoice True
+        fakeAdvance fake 50
+        backendReplace b SongVoice (silence 800)
+        kept <- backendStatus b SongVoice
+        fakeAdvance fake 100
+        looped <- backendStatus b SongVoice
+        backendReplace b SongVoice (silence 100)
+        short <- backendStatus b SongVoice
+        check "Replacing a buffer keeps position, loop, and playback" $
+            kept == VoiceStatus 350 800 0 True && statusPosition looped == 250 && statusPlaying looped
+            && short == VoiceStatus 100 100 1 False
+
+    , check "Waveform peaks cover every frame once" $
+        waveformPeaks 3 (V.fromList [Frame 1 0, Frame 0 (-2), Frame 3 0, Frame 0 0, Frame (-4) 0, Frame 0 5, Frame 0.5 0.5])
+            == [(-2, 1), (0, 3), (-4, 5)]
+        && length (waveformPeaks 10 (silence 4)) == 4
+        && null (waveformPeaks 10 V.empty)
     ]
 
 audioTests :: IO Bool
 audioTests = do
     putStrLn "--- Running Audio Transport Tests ---"
-    rs <- forM [prop_advanceAdditive, prop_positionBounded, prop_mixerMatchesModel] (quickCheckWithResult stdArgs { maxSuccess = 500 })
+    rs <- forM [prop_advanceAdditive, prop_positionBounded, prop_mixerMatchesModel, prop_heardPosition] (quickCheckWithResult stdArgs { maxSuccess = 500 })
     interleaved <- check "Frames interleave as L,R,L,R"
         (framesToInterleaved (V.fromList [Frame 1 2, Frame 3 4]) == V.fromList [1, 2, 3, 4])
     fakes <- fakeScenarios

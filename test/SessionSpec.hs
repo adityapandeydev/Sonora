@@ -8,6 +8,8 @@ import Data.Aeson
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KM
 import Data.IORef
+import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Maybe (fromJust, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -24,6 +26,7 @@ import Sonora.Project.Render (renderCompiled)
 import Sonora.Project.Types (Command (..), MixUpdate (..), Revision (..), TrackId (..), noMixUpdate)
 import Sonora.Project.Update (newProject)
 import Sonora.Render.Engine (normalizeSignal, renderSong)
+import Sonora.Service.Methods (applicationMethods, serialMethods)
 import Sonora.Service.Protocol
 import Sonora.Service.Session
 import Sonora.Signal.Core
@@ -117,6 +120,9 @@ waitUntil h cond = fmap (maybe False (const True)) $ timeout 3000000 $
 
 finishedCount :: Int -> [Event] -> Bool
 finishedCount n es = length (named "render.finished" es) >= n
+
+code :: Either ServiceError a -> ErrorCode
+code = either errorCode (const InternalError)
 
 check :: String -> IO Bool -> IO Bool
 check name t = do
@@ -266,6 +272,126 @@ scenarios =
         return $ either errorCode (const InternalError) r1 == AudioUnavailable
             && either errorMessage (const "") r1 == "no output device"
             && either errorCode (const InternalError) r2 == AudioUnavailable && opens == 2)
+
+    , ("Seek moves playback, also before the device is open", withHarness fakes $ \h -> do
+        early <- seek (hSession h) (hEmit h) 1
+        _ <- startRender (hSession h) (hEmit h)
+        _ <- waitUntil h (finishedCount 1)
+        v1 <- seek (hSession h) (hEmit h) 1.5
+        _ <- play (hSession h) (hEmit h)
+        started <- backendStatus (fakeBackend (hFake h)) SongVoice
+        _ <- seek (hSession h) (hEmit h) 3
+        moved <- backendStatus (fakeBackend (hFake h)) SongVoice
+        v2 <- seek (hSession h) (hEmit h) 99
+        bad <- mapM (seek (hSession h) (hEmit h)) [-1, 0 / 0, 1 / 0]
+        return $ code early == NoRender
+            && (either (const Nothing) (num ["positionSeconds"]) v1) == Just 1.5
+            && statusPosition started == 1500 && statusPlaying started
+            && statusPosition moved == 3000 && statusPlaying moved
+            && either (const Nothing) (num ["positionSeconds"]) v2 == Just 4
+            && all ((== InvalidValue) . code) bad)
+
+    , ("Loops wrap sample-accurately, survive re-rendering, and validate", withHarness fakes $ \h -> do
+        _ <- startRender (hSession h) (hEmit h)
+        _ <- waitUntil h (finishedCount 1)
+        _ <- setLoop (hSession h) (hEmit h) (Just (1, 2))
+        _ <- seek (hSession h) (hEmit h) 1.9
+        _ <- play (hSession h) (hEmit h)
+        fakeAdvance (hFake h) 150
+        wrapped <- backendStatus (fakeBackend (hFake h)) SongVoice
+        _ <- setScore (hSession h) (hEmit h) scoreB
+        _ <- waitUntil h (finishedCount 2)
+        fakeAdvance (hFake h) 1000
+        after <- backendStatus (fakeBackend (hFake h)) SongVoice
+        beyond <- setLoop (hSession h) (hEmit h) (Just (10, 12))
+        cleared <- setLoop (hSession h) (hEmit h) Nothing
+        bad <- mapM (setLoop (hSession h) (hEmit h) . Just) [(2, 1), (1, 1.01), (-1, 2), (0, 1 / 0)]
+        return $ statusPosition wrapped == 1050 && statusPosition after == 1050 && statusPlaying after
+            && either (const Nothing) (path ["loopActive"]) beyond == Just (Bool False)
+            && either (const Nothing) (path ["loop"]) cleared == Just Null
+            && all ((== InvalidValue) . code) bad)
+
+    , ("Volume applies to the device and validates", withHarness fakes $ \h -> do
+        before <- setVolume (hSession h) (hEmit h) 0.25
+        _ <- startRender (hSession h) (hEmit h)
+        _ <- waitUntil h (finishedCount 1)
+        _ <- play (hSession h) (hEmit h)
+        atOpen <- fakeMasterGain (hFake h)
+        _ <- setVolume (hSession h) (hEmit h) 0.5
+        later <- fakeMasterGain (hFake h)
+        bad <- mapM (setVolume (hSession h) (hEmit h)) [-0.1, 1.1, 0 / 0]
+        es <- events h
+        return $ either (const Nothing) (num ["volume"]) before == Just 0.25
+            && atOpen == 0.25 && later == 0.5 && all ((== InvalidValue) . code) bad
+            && length (named "render.started" es) == 1)
+
+    , ("Losing the device keeps position, loop, and volume for the next play", do
+        opened <- newIORef []
+        eventLog <- newIORef []
+        let cfg = defaultSessionConfig
+                { sessionSampleRate = 1000
+                , sessionRenderer = fakeRenderer fakes
+                , sessionOpenAudio = \_ -> do
+                    fake <- newFakeAudio 1000
+                    modifyIORef' opened (fake :)
+                    return (Right (fakeBackend fake))
+                , sessionInitialScore = scoreA
+                , sessionTelemetryMicros = 10000 }
+        s <- newSession cfg
+        let emit e = atomicModifyIORef' eventLog (\es -> (e : es, ()))
+            h = Harness s emit eventLog (error "no shared fake") opens0
+            opens0 = error "unused"
+        (do _ <- startRender s emit
+            _ <- waitUntil h (finishedCount 1)
+            _ <- setVolume s emit 0.5
+            _ <- setLoop s emit (Just (1, 3))
+            _ <- play s emit
+            readIORef opened >>= mapM_ (`fakeAdvance` 1234)
+            readIORef opened >>= mapM_ fakeLoseDevice
+            told <- waitUntil h (any (\v -> path ["deviceLost"] v == Just (Bool True)) . named "transport")
+            lost <- transportView s
+            firsts <- readIORef opened
+            closed <- mapM fakeIsClosed firsts
+            _ <- play s emit
+            fakesNow <- readIORef opened
+            case fakesNow of
+                (f2 : _) -> do
+                    st <- backendStatus (fakeBackend f2) SongVoice
+                    vol <- fakeMasterGain f2
+                    fakeAdvance f2 1800
+                    looped <- backendStatus (fakeBackend f2) SongVoice
+                    again <- transportView s
+                    return $ told && and closed && length fakesNow == 2
+                        && path ["playing"] lost == Just (Bool False) && num ["positionSeconds"] lost == Just 1.234
+                        && statusPosition st == 1234 && statusPlaying st && vol == 0.5
+                        && statusPosition looped == 1034
+                        && path ["deviceLost"] again == Just (Bool False)
+                [] -> return False) `finally` closeSession s)
+
+    , ("Repeated seeks while playing end exactly at the last target", withHarness fakes $ \h -> do
+        _ <- startRender (hSession h) (hEmit h)
+        _ <- waitUntil h (finishedCount 1)
+        _ <- play (hSession h) (hEmit h)
+        mapM_ (\i -> seek (hSession h) (hEmit h) (fromIntegral (i * 7 `mod` 40 :: Int) / 10)
+                        >> fakeAdvance (hFake h) 3) [1 .. 500]
+        _ <- seek (hSession h) (hEmit h) 2
+        fakeAdvance (hFake h) 10
+        st <- backendStatus (fakeBackend (hFake h)) SongVoice
+        opens <- readIORef (hOpens h)
+        return (st == VoiceStatus 2010 4000 (statusEndCount st) True && opens == 1))
+
+    , ("Waveform overview is bounded and tagged", withHarness fakes $ \h -> do
+        early <- renderPeaks (hSession h) 100
+        _ <- startRender (hSession h) (hEmit h)
+        _ <- waitUntil h (finishedCount 1)
+        r <- renderPeaks (hSession h) 100
+        bad <- mapM (renderPeaks (hSession h)) [0, maxPeakBuckets + 1]
+        return $ code early == NoRender && all ((== InvalidValue) . code) bad
+            && either (const False) (\v -> num ["jobId"] v == Just 1
+                && maybe False (\p -> case p of { Array a -> length a == 100; _ -> False }) (path ["peaks"] v)) r)
+
+    , ("Every state-changing method is serial", withHarness fakes $ \h ->
+        return (Map.keysSet (applicationMethods (hSession h)) == Set.insert "render.peaks" serialMethods))
 
     , ("Project commands report structured errors and re-render on success", withHarness fakes $ \h -> do
         _ <- startRender (hSession h) (hEmit h)

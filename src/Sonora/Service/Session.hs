@@ -18,7 +18,12 @@
 -- separately as @scoreIsCurrent@.
 --
 -- Playback always uses the latest finished render. When a newer render
--- finishes during playback it is swapped in at the same position.
+-- finishes it is swapped in at the same position, keeping the loop.
+--
+-- Transport positions are what is being heard, not what has been queued to
+-- the device. Position, loop, and volume belong to the session rather than
+-- the device, so they survive losing and reopening it. Volume is a listening
+-- level and does not affect renders.
 module Sonora.Service.Session
     ( SessionConfig (..)
     , defaultSessionConfig
@@ -36,7 +41,13 @@ module Sonora.Service.Session
     , play
     , pause
     , stop
+    , seek
+    , setLoop
+    , setVolume
     , transportView
+    , renderPeaks
+    , maxPeakBuckets
+    , minLoopSeconds
     ) where
 
 import Control.Concurrent
@@ -59,6 +70,7 @@ import Sonora.Project.Types
 import Sonora.Project.Update
 import Sonora.Service.Protocol
 import Sonora.Signal.Core (Frame)
+import Sonora.Signal.Waveform (waveformPeaks)
 
 type Emit = Event -> IO ()
 
@@ -78,7 +90,7 @@ defaultSessionConfig = SessionConfig
     , sessionRenderer        = renderCompiled
     , sessionOpenAudio       = openDeviceBackend
     , sessionInitialScore    = starterScore
-    , sessionTelemetryMicros = 100000
+    , sessionTelemetryMicros = 40000
     }
 
 -- | The score a new session starts with.
@@ -140,6 +152,10 @@ data St = St
     , stAudio    :: !(Maybe AudioBackend)  -- ^ Opened on first play.
     , stLoaded   :: !(Maybe Finished)      -- ^ Render loaded on the song voice.
     , stWatcher  :: !(Maybe ThreadId)      -- ^ Emits transport events while playing.
+    , stCue      :: !Double                -- ^ Position in seconds while nothing is loaded.
+    , stLoop     :: !(Maybe (Double, Double)) -- ^ Loop range in seconds.
+    , stVolume   :: !Double
+    , stLost     :: !Bool                  -- ^ The device went away; cleared by reopening it.
     }
 
 data Session = Session
@@ -157,6 +173,10 @@ newSession cfg = Session cfg <$> newMVar St
     , stAudio    = Nothing
     , stLoaded   = Nothing
     , stWatcher  = Nothing
+    , stCue      = 0
+    , stLoop     = Nothing
+    , stVolume   = 1
+    , stLost     = False
     }
 
 -- | Stop rendering and playback and release the audio device.
@@ -315,29 +335,53 @@ runJob s emit jid rev inputs compiled = do
                         let fin = Finished jid rev inputs frames (sessionSampleRate (sConfig s)) (round ((t1 - t0) * 1000))
                             isCurrent = inputs == renderInputs (stProject st)
                         emit (Event "render.finished" (finishedJson fin isCurrent))
-                        swapInIfPlaying emit st { stRunning = Nothing, stFinished = Just fin }
+                        swapIn emit st { stRunning = Nothing, stFinished = Just fin }
                     Left e -> do
                         let msg = T.pack (displayException e)
                         emit $ Event "render.failed" $ object ["jobId" .= jid, "revision" .= rev, "message" .= msg]
                         return st { stRunning = Nothing, stFailure = Just (Failure jid rev inputs msg) }
 
--- | During playback, replace the playing render with the latest one at the
--- same position.
-swapInIfPlaying :: Emit -> St -> IO St
-swapInIfPlaying emit st = case (stAudio st, stLoaded st, stFinished st) of
+-- | Replace the loaded render with the latest one at the same position.
+swapIn :: Emit -> St -> IO St
+swapIn emit st = case (stAudio st, stLoaded st, stFinished st) of
     (Just b, Just loaded, Just fin) | finJobId loaded /= finJobId fin -> do
-        status <- backendStatus b SongVoice
-        if not (statusPlaying status) then return st else do
-            backendLoad b SongVoice (finFrames fin)
-            backendSeek b SongVoice (statusPosition status)
-            backendSetPlaying b SongVoice True
-            let st' = st { stLoaded = Just fin }
-            transportViewLocked st' >>= emit . Event "transport"
-            return st'
+        backendReplace b SongVoice (finFrames fin)
+        let st' = st { stLoaded = Just fin }
+        applyLoop st'
+        emitTransport emit st'
+        return st'
     _ -> return st
 
 -------------------------------------------------------------------------------
+-- Waveform
+
+maxPeakBuckets :: Int
+maxPeakBuckets = 4096
+
+-- | A bounded overview of the latest finished render, as @[min, max]@ pairs.
+renderPeaks :: Session -> Int -> IO (Either ServiceError Value)
+renderPeaks s buckets
+    | buckets < 1 || buckets > maxPeakBuckets = return $ Left $ serviceError InvalidValue
+        ("\"buckets\" must be between 1 and " <> T.pack (show maxPeakBuckets))
+    | otherwise = do
+        finished <- stFinished <$> readMVar (sState s)
+        return $ case finished of
+            Nothing -> Left (serviceError NoRender "Nothing has been rendered yet")
+            Just fin -> Right $ object
+                [ "jobId"           .= finJobId fin
+                , "durationSeconds" .= durationSeconds fin
+                , "peaks"           .= [ [milli lo, milli hi] | (lo, hi) <- waveformPeaks buckets (finFrames fin) ]
+                ]
+  where
+    milli :: Double -> Double
+    milli x = fromIntegral (round (x * 1000) :: Int) / 1000
+
+-------------------------------------------------------------------------------
 -- Transport
+
+-- | The shortest accepted loop.
+minLoopSeconds :: Double
+minLoopSeconds = 0.05
 
 transportView :: Session -> IO Value
 transportView s = withMVar (sState s) transportViewLocked
@@ -346,76 +390,179 @@ transportViewLocked :: St -> IO Value
 transportViewLocked st = case (stAudio st, stLoaded st) of
     (Just b, Just fin) -> do
         status <- backendStatus b SongVoice
+        heard <- backendHeard b SongVoice
         lost <- backendDeviceLost b
-        let ahead = if statusPlaying status then fromIntegral (backendLatencyFrames b) else 0 :: Word64
-            audible = if statusPosition status > ahead then statusPosition status - ahead else 0
-        return $ object
-            [ "playing"         .= statusPlaying status
-            , "positionSeconds" .= (fromIntegral audible / fromIntegral (backendSampleRate b) :: Double)
-            , "durationSeconds" .= durationSeconds fin
-            , "jobId"           .= finJobId fin
-            , "revision"        .= finRevision fin
-            , "current"         .= (finInputs fin == renderInputs (stProject st))
-            , "deviceLost"      .= lost
-            ]
-    _ -> return $ object
-        [ "playing" .= False, "positionSeconds" .= (0 :: Double)
-        , "durationSeconds" .= maybe (0 :: Double) durationSeconds (stFinished st)
-        , "jobId" .= (Nothing :: Maybe Int), "revision" .= (Nothing :: Maybe Int)
-        , "current" .= False, "deviceLost" .= False ]
+        let atEnd = statusLength status > 0 && statusPosition status >= statusLength status
+            -- The song has ended for the mixer but its last moments are
+            -- still on their way to the speaker.
+            finishing = not (statusPlaying status) && heardPlaying heard && atEnd
+        return $ view (not lost && (statusPlaying status || finishing))
+            (toSeconds b (heardPosition heard)) (Just fin) (stLost st || lost)
+    _ -> return $ view False (stCue st) (stFinished st) (stLost st)
+  where
+    view :: Bool -> Double -> Maybe Finished -> Bool -> Value
+    view playing position render lost = object
+        [ "playing"         .= playing
+        , "positionSeconds" .= position
+        , "durationSeconds" .= maybe 0 durationSeconds render
+        , "jobId"           .= fmap finJobId (stLoaded st)
+        , "revision"        .= fmap finRevision (stLoaded st)
+        , "current"         .= maybe False ((== renderInputs (stProject st)) . finInputs) (stLoaded st)
+        , "loop"            .= fmap (\(a, b) -> object ["start" .= a, "end" .= b]) (stLoop st)
+        , "loopActive"      .= maybe False (\f -> isJust (loopFrames f (stLoop st))) render
+        , "volume"          .= stVolume st
+        , "deviceLost"      .= lost
+        ]
 
--- | Play the latest finished render from the current position.
+emitTransport :: Emit -> St -> IO ()
+emitTransport emit st = transportViewLocked st >>= emit . Event "transport"
+
+toSeconds :: AudioBackend -> Word64 -> Double
+toSeconds b frames = fromIntegral frames / fromIntegral (backendSampleRate b)
+
+-- | A loop range in frames of a render; Nothing if too little of it is left.
+loopFrames :: Finished -> Maybe (Double, Double) -> Maybe (Word64, Word64)
+loopFrames fin range = do
+    (a, b) <- range
+    let rate = fromIntegral (finRate fin) :: Double
+        len = fromIntegral (V.length (finFrames fin)) :: Word64
+        from = round (a * rate)
+        to = min len (round (b * rate))
+    if to > from && fromIntegral (to - from) >= minLoopSeconds * rate * 0.99 then Just (from, to) else Nothing
+
+applyLoop :: St -> IO ()
+applyLoop st = case (stAudio st, stLoaded st) of
+    (Just b, Just fin) -> backendSetLoop b SongVoice (loopFrames fin (stLoop st))
+    _ -> return ()
+
+-- | Play the latest finished render from the current position, or from the
+-- start if the position is at the end.
 play :: Session -> Emit -> IO (Either ServiceError Value)
-play s emit = modifyMVar (sState s) $ \st -> case stFinished st of
-    Nothing -> return (st, Left (serviceError NoRender
-        (if isJust (stRunning st) then "The song is still rendering" else "Nothing has been rendered yet")))
-    Just fin -> do
-        audio <- ensureAudio s st
-        case audio of
-            Left err -> return (st { stAudio = Nothing, stLoaded = Nothing },
-                Left (serviceError AudioUnavailable (T.pack (audioErrorMessage err))))
-            Right st1@St { stAudio = Just b } -> do
-                st2 <- if fmap finJobId (stLoaded st1) == Just (finJobId fin) then return st1 else do
-                    pos <- if isJust (stLoaded st1) then statusPosition <$> backendStatus b SongVoice else return 0
-                    backendLoad b SongVoice (finFrames fin)
-                    backendSeek b SongVoice pos
-                    return st1 { stLoaded = Just fin }
-                status <- backendStatus b SongVoice
-                when (statusPosition status >= statusLength status) $ backendSeek b SongVoice 0
-                backendSetPlaying b SongVoice True
-                st3 <- ensureWatcher s emit st2
-                v <- transportViewLocked st3
-                emit (Event "transport" v)
-                return (st3, Right v)
-            Right st1 -> return (st1, Left (serviceError AudioUnavailable "Audio output is not open"))
+play s emit = modifyMVar (sState s) $ \st0 -> do
+    st <- noticeLoss st0
+    case stFinished st of
+        Nothing -> return (st, Left (noRender st))
+        Just fin -> do
+            opened <- ensureAudio s st
+            case opened of
+                Left err -> return (st, Left (serviceError AudioUnavailable (T.pack (audioErrorMessage err))))
+                Right (b, st1) -> do
+                    st2 <- ensureLoaded b fin st1
+                    status <- backendStatus b SongVoice
+                    when (statusPosition status >= statusLength status) $ backendSeek b SongVoice 0
+                    backendSetPlaying b SongVoice True
+                    st3 <- ensureWatcher s emit st2
+                    v <- transportViewLocked st3
+                    emit (Event "transport" v)
+                    return (st3, Right v)
+
+noRender :: St -> ServiceError
+noRender st = serviceError NoRender
+    (if isJust (stRunning st) then "The song is still rendering" else "Nothing has been rendered yet")
 
 pause :: Session -> Emit -> IO Value
-pause s emit = transportOp s emit $ \b -> backendSetPlaying b SongVoice False
+pause s emit = transportOp s emit $ \st -> st <$ onLoaded st (\b -> backendSetPlaying b SongVoice False)
 
 stop :: Session -> Emit -> IO Value
-stop s emit = transportOp s emit $ \b -> backendSetPlaying b SongVoice False >> backendSeek b SongVoice 0
+stop s emit = transportOp s emit $ \st -> do
+    onLoaded st $ \b -> backendSetPlaying b SongVoice False >> backendSeek b SongVoice 0
+    return st { stCue = 0 }
 
-transportOp :: Session -> Emit -> (AudioBackend -> IO ()) -> IO Value
-transportOp s emit op = withMVar (sState s) $ \st -> do
-    case (stAudio st, stLoaded st) of
-        (Just b, Just _) -> op b
-        _ -> return ()
-    v <- transportViewLocked st
+-- | Move to a position in seconds; past the end means the end.
+seek :: Session -> Emit -> Double -> IO (Either ServiceError Value)
+seek s emit seconds
+    | not (finite seconds) || seconds < 0 = invalid "\"seconds\" must be a non-negative number"
+    | otherwise = modifyMVar (sState s) $ \st0 -> do
+        st <- noticeLoss st0
+        case stFinished st of
+            Nothing -> return (st, Left (noRender st))
+            Just fin -> do
+                let target = min seconds (durationSeconds fin)
+                    st' = st { stCue = target }
+                onLoaded st' $ \b -> backendSeek b SongVoice (round (target * fromIntegral (backendSampleRate b)))
+                v <- transportViewLocked st'
+                emit (Event "transport" v)
+                return (st', Right v)
+
+-- | Set or clear the loop range in seconds. The part beyond the end of the
+-- song is ignored; a loop with too little left is kept but inactive.
+setLoop :: Session -> Emit -> Maybe (Double, Double) -> IO (Either ServiceError Value)
+setLoop s emit range = case range of
+    Just (a, b)
+        | not (finite a && finite b) || a < 0 -> invalid "Loop positions must be non-negative numbers"
+        | b - a < minLoopSeconds -> invalid ("A loop must be at least " <> T.pack (show minLoopSeconds) <> " seconds long")
+    _ -> fmap Right $ transportOp s emit $ \st -> do
+        let st' = st { stLoop = range }
+        applyLoop st'
+        return st'
+
+-- | Set the listening volume, 0 to 1.
+setVolume :: Session -> Emit -> Double -> IO (Either ServiceError Value)
+setVolume s emit volume
+    | not (finite volume) || volume < 0 || volume > 1 = invalid "\"volume\" must be between 0 and 1"
+    | otherwise = fmap Right $ transportOp s emit $ \st -> do
+        forM_ (stAudio st) (`backendSetMasterGain` volume)
+        return st { stVolume = volume }
+
+finite :: Double -> Bool
+finite x = not (isNaN x || isInfinite x)
+
+invalid :: Text -> IO (Either ServiceError a)
+invalid = return . Left . serviceError InvalidValue
+
+transportOp :: Session -> Emit -> (St -> IO St) -> IO Value
+transportOp s emit op = modifyMVar (sState s) $ \st -> do
+    st' <- noticeLoss st >>= op
+    v <- transportViewLocked st'
     emit (Event "transport" v)
-    return v
+    return (st', v)
 
--- | An open, working audio backend; reopens one that lost its device.
-ensureAudio :: Session -> St -> IO (Either AudioError St)
-ensureAudio s st = do
-    usable <- case stAudio st of
-        Just b -> not <$> backendDeviceLost b
-        Nothing -> return False
-    if usable then return (Right st) else do
-        forM_ (stAudio st) backendClose
+onLoaded :: St -> (AudioBackend -> IO ()) -> IO ()
+onLoaded st act = case (stAudio st, stLoaded st) of
+    (Just b, Just _) -> act b
+    _ -> return ()
+
+-- | If the device went away, release it and remember where playback was.
+noticeLoss :: St -> IO St
+noticeLoss st = case stAudio st of
+    Nothing -> return st
+    Just b -> do
+        lost <- backendDeviceLost b
+        if not lost then return st else do
+            cue <- if isJust (stLoaded st)
+                then toSeconds b . heardPosition <$> backendHeard b SongVoice
+                else return (stCue st)
+            backendClose b
+            return st { stAudio = Nothing, stLoaded = Nothing, stCue = cue, stLost = True }
+
+-- | An open audio backend. Call 'noticeLoss' first.
+ensureAudio :: Session -> St -> IO (Either AudioError (AudioBackend, St))
+ensureAudio s st = case stAudio st of
+    Just b -> return (Right (b, st))
+    Nothing -> do
         opened <- sessionOpenAudio (sConfig s) (sessionSampleRate (sConfig s))
-        return $ fmap (\b -> st { stAudio = Just b, stLoaded = Nothing }) opened
+        case opened of
+            Left err -> return (Left err)
+            Right b -> do
+                backendSetMasterGain b (stVolume st)
+                return (Right (b, st { stAudio = Just b, stLoaded = Nothing, stLost = False }))
 
--- | Emit @transport@ events while playing; stops once playback stops.
+-- | Load a render onto the song voice, continuing from the current position.
+ensureLoaded :: AudioBackend -> Finished -> St -> IO St
+ensureLoaded b fin st
+    | fmap finJobId (stLoaded st) == Just (finJobId fin) = return st
+    | otherwise = do
+        if isJust (stLoaded st)
+            then backendReplace b SongVoice (finFrames fin)
+            else do
+                backendLoad b SongVoice (finFrames fin)
+                backendSeek b SongVoice (round (stCue st * fromIntegral (backendSampleRate b)))
+        let st' = st { stLoaded = Just fin }
+        applyLoop st'
+        return st'
+
+-- | Emit @transport@ events while sound is coming out; the last one reports
+-- the final position.
 ensureWatcher :: Session -> Emit -> St -> IO St
 ensureWatcher s emit st
     | isJust (stWatcher st) = return st
@@ -425,14 +572,12 @@ ensureWatcher s emit st
   where
     loop = do
         threadDelay (sessionTelemetryMicros (sConfig s))
-        continue <- modifyMVar (sState s) $ \st' -> do
-            v <- transportViewLocked st'
-            emit (Event "transport" v)
-            playing <- case stAudio st' of
-                Just b -> do
-                    status <- backendStatus b SongVoice
-                    lost <- backendDeviceLost b
-                    return (statusPlaying status && not lost)
+        continue <- modifyMVar (sState s) $ \before -> do
+            st' <- noticeLoss before
+            active <- case stAudio st' of
+                Just b -> (\status heard -> statusPlaying status || heardPlaying heard)
+                    <$> backendStatus b SongVoice <*> backendHeard b SongVoice
                 Nothing -> return False
-            return (if playing then (st', True) else (st' { stWatcher = Nothing }, False))
+            emitTransport emit st'
+            return (if active then st' else st' { stWatcher = Nothing }, active)
         when continue loop

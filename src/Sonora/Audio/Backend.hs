@@ -12,14 +12,15 @@
 -- device and the deterministic test backend, follows it.
 module Sonora.Audio.Backend
     ( Voice (..)
-    , voiceIndex
     , VoiceStatus (..)
+    , Heard (..)
     , AudioError (..)
     , AudioBackend (..)
       -- * Reference transport model
     , VoiceModel (..)
     , emptyVoiceModel
     , loadVoiceModel
+    , replaceVoiceModel
     , setPlayingModel
     , seekModel
     , setLoopModel
@@ -30,7 +31,6 @@ module Sonora.Audio.Backend
     , framesToInterleaved
     ) where
 
-import Data.Int (Int32)
 import Data.Word (Word32, Word64)
 import GHC.Generics (Generic)
 import qualified Data.Vector.Storable as V
@@ -42,17 +42,19 @@ data Voice
     | AuditionVoice
     deriving (Eq, Ord, Show, Enum, Bounded, Generic)
 
--- | Index used by the native shim.
-voiceIndex :: Voice -> Int32
-voiceIndex SongVoice     = 0
-voiceIndex AuditionVoice = 1
-
 -- | Observable state of a voice.
 data VoiceStatus = VoiceStatus
     { statusPosition :: !Word64  -- ^ Next frame to be played.
     , statusLength   :: !Word64  -- ^ Frames in the loaded buffer.
     , statusEndCount :: !Word32  -- ^ Times the voice reached the end of its buffer.
     , statusPlaying  :: !Bool
+    } deriving (Eq, Show, Generic)
+
+-- | What is coming out of the speaker, as opposed to what is being rendered
+-- ahead of it.
+data Heard = Heard
+    { heardPosition :: !Word64
+    , heardPlaying  :: !Bool
     } deriving (Eq, Show, Generic)
 
 -- | An audio backend failure, such as no available output device.
@@ -70,6 +72,9 @@ data AudioBackend = AudioBackend
     , backendSampleRate    :: !Int
       -- | Replace a voice's buffer. The voice stops, rewinds, and clears its loop.
     , backendLoad          :: Voice -> V.Vector Frame -> IO ()
+      -- | Replace a voice's buffer in place, keeping position, loop, and
+      -- playback. A position past the new end stops the voice there.
+    , backendReplace       :: Voice -> V.Vector Frame -> IO ()
     , backendSetPlaying    :: Voice -> Bool -> IO ()
       -- | Move to a frame; positions past the end clamp to the buffer length.
     , backendSeek          :: Voice -> Word64 -> IO ()
@@ -79,6 +84,9 @@ data AudioBackend = AudioBackend
     , backendSetGain       :: Voice -> Double -> IO ()
     , backendSetMasterGain :: Double -> IO ()
     , backendStatus        :: Voice -> IO VoiceStatus
+      -- | Position currently audible. After a load or seek, the target
+      -- position until it becomes audible.
+    , backendHeard         :: Voice -> IO Heard
       -- | True once the device stopped without being asked to.
     , backendDeviceLost    :: IO Bool
       -- | Frames queued ahead of the speaker. Voice positions run this far
@@ -105,6 +113,17 @@ emptyVoiceModel = VoiceModel 0 0 False Nothing 0
 -- observers can still detect ends by comparing counts.
 loadVoiceModel :: Word64 -> VoiceModel -> VoiceModel
 loadVoiceModel len vm = vm { vmLength = len, vmPosition = 0, vmPlaying = False, vmLoop = Nothing }
+
+-- | Swap in a buffer of another length, keeping position, loop, and playback.
+replaceVoiceModel :: Word64 -> VoiceModel -> VoiceModel
+replaceVoiceModel len vm
+    | vmPosition vm < len = vm { vmLength = len }
+    | otherwise = vm
+        { vmLength   = len
+        , vmPosition = len
+        , vmPlaying  = False
+        , vmEndCount = if vmPlaying vm then vmEndCount vm + 1 else vmEndCount vm
+        }
 
 -- | A voice only starts if it has frames left to play.
 setPlayingModel :: Bool -> VoiceModel -> VoiceModel

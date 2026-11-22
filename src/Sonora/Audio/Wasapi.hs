@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE ForeignFunctionInterface #-}
 -- | Windows audio output through WASAPI, bound directly with the FFI.
 --
@@ -19,12 +20,13 @@ import Control.Monad (unless, void, when)
 import Data.Bits ((.|.))
 import Data.Int (Int32, Int64)
 import Data.IORef
-import Data.Word (Word16, Word32, Word8)
+import Data.Word (Word16, Word32, Word64, Word8)
 import Foreign.C.String (peekCWString)
 import Foreign.Marshal.Alloc (alloca, allocaBytes)
 import Foreign.Marshal.Utils (fillBytes)
 import Foreign.Ptr
 import Foreign.Storable
+import GHC.Clock (getMonotonicTime)
 import Numeric (showHex)
 
 import Sonora.Audio.Backend (AudioError (..))
@@ -33,6 +35,8 @@ import Sonora.Audio.Mixer (Mixer, mixerRender, mixerSampleRate)
 data WasapiOutput = WasapiOutput
     { wasapiDeviceName    :: !String
     , wasapiBufferFrames  :: !Int
+      -- | Estimated output frames that have reached the speaker.
+    , wasapiPlayed        :: IO Word64
     , wasapiLost          :: IO Bool
     , wasapiUnderruns     :: IO Int
       -- | Stop the stream and release the device; waits for the output thread.
@@ -194,8 +198,10 @@ openWasapi bufferMillis mixer = do
     lost <- newIORef False
     underruns <- newIORef (0 :: Int)
     eventVar <- newIORef nullPtr
+    clock <- newIORef (0, 0)
+    reported <- newIORef 0
     _ <- forkOS $
-        (outputThread bufferMillis mixer ready stopping lost underruns eventVar
+        (outputThread bufferMillis mixer ready stopping lost underruns eventVar clock
             `catch` \e -> do
                 writeIORef lost True
                 void (tryPutMVar ready (Left (AudioError (-1) (displayException (e :: SomeException))))))
@@ -206,6 +212,7 @@ openWasapi bufferMillis mixer = do
         Right (name, frames) -> Right WasapiOutput
             { wasapiDeviceName   = name
             , wasapiBufferFrames = frames
+            , wasapiPlayed       = playedFrames (mixerSampleRate mixer) frames clock reported
             , wasapiLost         = readIORef lost
             , wasapiUnderruns    = readIORef underruns
             , wasapiClose        = do
@@ -217,8 +224,8 @@ openWasapi bufferMillis mixer = do
 
 outputThread
     :: Int -> Mixer -> MVar (Either AudioError (String, Int)) -> IORef Bool -> IORef Bool
-    -> IORef Int -> IORef (Ptr ()) -> IO ()
-outputThread bufferMillis mixer ready stopping lost underruns eventVar = do
+    -> IORef Int -> IORef (Ptr ()) -> IORef (Word64, Double) -> IO ()
+outputThread bufferMillis mixer ready stopping lost underruns eventVar clock = do
     cleanups <- newIORef [] :: IO (IORef [IO ()])
     let onCleanup act = modifyIORef cleanups (act :)
         runCleanups = readIORef cleanups >>= sequence_
@@ -341,9 +348,26 @@ outputThread bufferMillis mixer ready stopping lost underruns eventVar = do
                                         out <- peek bufPtr
                                         mixerRender mixer avail out
                                             `onException` fillBytes out 0 (avail * 8)
-                                        succeeded <$> releaseBuffer render (fromIntegral avail) 0
+                                        hrRel <- releaseBuffer render (fromIntegral avail) 0
+                                        now <- getMonotonicTime
+                                        (written, _) <- readIORef clock
+                                        let !written' = written + fromIntegral avail
+                                        writeIORef clock (written', now)
+                                        return (succeeded hrRel)
                                 if ok then loop else writeIORef lost True
             loop
+
+-- | The buffer is full right after each refill; since then the device has
+-- played for the elapsed time, at most everything queued. Refills are not
+-- perfectly regular, so the estimate is kept from ever stepping back.
+playedFrames :: Int -> Int -> IORef (Word64, Double) -> IORef Word64 -> IO Word64
+playedFrames sampleRate bufferFrames clock reported = do
+    (written, at) <- readIORef clock
+    now <- getMonotonicTime
+    let elapsed = max 0 (min bufferFrames (round ((now - at) * fromIntegral sampleRate)))
+        queued = fromIntegral (bufferFrames - elapsed)
+        estimate = if written > queued then written - queued else 0
+    atomicModifyIORef' reported (\x -> let !x' = max x estimate in (x', x'))
 
 -- | Friendly name of an endpoint, or a generic label if unavailable.
 deviceName :: Obj -> IO String
