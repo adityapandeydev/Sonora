@@ -1,6 +1,7 @@
 module Main (main) where
 
 import System.Exit (exitFailure, exitSuccess)
+import System.IO (BufferMode (..), hSetBuffering, stdout)
 import MusicSpec (musicTests)
 import SignalSpec (signalTests)
 import ParserSpec (parserTests)
@@ -12,6 +13,7 @@ import SessionSpec (sessionTests)
 
 main :: IO ()
 main = do
+    hSetBuffering stdout LineBuffering  -- show how far a run got even if it dies
     putStrLn "========================================================"
     putStrLn "   SONORA FUNCTIONAL SYNTHESIS & DSP ENGINE TEST SUITE  "
     putStrLn "========================================================"

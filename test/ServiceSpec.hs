@@ -13,6 +13,8 @@ import qualified Data.ByteString.Lazy as BL
 import Data.Maybe (isJust)
 import Data.Text (Text)
 import qualified Data.Set as Set
+import qualified Data.Text as T
+import GHC.Conc (getNumProcessors)
 import System.Directory (findExecutable)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
@@ -111,6 +113,12 @@ session = withSession 4096
 serial :: (Session -> IO Bool) -> IO Bool
 serial = withSessionSerial 4096 ["diagnostic.sleep", "diagnostic.echo"]
 
+-- | Run with as much parallelism as the real service has.
+onAllCores :: IO a -> IO a
+onAllCores act = do
+    before <- getNumCapabilities
+    (getNumProcessors >>= setNumCapabilities >> act) `finally` setNumCapabilities before
+
 inProcessTests :: [(String, IO Bool)]
 inProcessTests =
     [ ("Serial methods answer in arrival order", serial $ \s -> do
@@ -144,10 +152,22 @@ inProcessTests =
         threadDelay 50000
         send s (request "c" "cancel" (object ["target" .= ("long" :: Text)]))
         rs <- recvN s 4
-        return $ case rs of
-            [_, x, y, z] -> isErr (Just "long") "cancelled" x && isOk "c" y
-                && isOk "next" z && path ["result", "k"] z == Just (Number 1)
-            _ -> False)
+        -- Answers to different requests may arrive in either order.
+        return $ length rs == 4
+            && any (isErr (Just "long") "cancelled") rs && any (isOk "c") rs
+            && any (\v -> isOk "next" v && path ["result", "k"] v == Just (Number 1)) rs)
+
+    , ("Cancelling serial requests as they start never stalls the queue", onAllCores $ serial $ \s -> do
+        send s hello
+        _ <- recv s
+        let rid i = "r" <> T.pack (show (i :: Int))
+        rs <- forM [1 .. 3000] $ \i -> do
+            send s (request (rid i) "diagnostic.echo" (object [])
+                    <> request ("c" <> rid i) "cancel" (object ["target" .= rid i]))
+            recvN s 2
+        send s (request "last" "diagnostic.echo" (object []))
+        final <- recv s
+        return (all ((== 2) . length) rs && maybe False (isOk "last") final))
 
     , ("Handshake negotiates version and lists methods", session $ \s -> do
         send s hello

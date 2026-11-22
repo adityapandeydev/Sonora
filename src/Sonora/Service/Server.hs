@@ -141,7 +141,9 @@ runServer cfg input output = do
             finished <- newEmptyMVar
             started <- modifyMVar inflight $ \m -> case Map.lookup rid m of
                 Just Nothing -> do
-                    tid <- forkIO (worker rid handler params `finally` putMVar finished ())
+                    -- Not forkIO with finally: a cancel landing before the
+                    -- handler is installed would lose the signal.
+                    tid <- forkFinally (worker rid handler params) (const (putMVar finished ()))
                     return (Map.insert rid (Just tid) m, True)
                 _ -> return (m, False)
             when started (takeMVar finished)
