@@ -6,7 +6,7 @@
 
 main {
   padding: 2rem;
-  max-width: 40rem;
+  max-width: 56rem;
 }
 
 .detail {
@@ -18,4 +18,29 @@ main {
 .actions {
   display: flex;
   gap: 0.5rem;
+}
+
+.workspace {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.workspace textarea {
+  font-family: ui-monospace, monospace;
+  font-size: 0.9rem;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.status-lines p {
+  margin: 0.25rem 0;
+}
+
+.diagnostics {
+  margin: 0;
+  padding-left: 1.25rem;
+}
+
+.error {
+  color: #d33;
 }

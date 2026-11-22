@@ -1,7 +1,9 @@
-// Placeholder shell: proves the host and engine connection. The product
-// interface replaces this.
+// Placeholder shell: engine connection plus the interim workspace. The
+// designed product interface replaces it.
 import { useEffect, useState } from "react";
-import { callEngine, engineStatus, onEngineStatus, restartEngine, State, type Status } from "./engine";
+import { engineStatus, onEngineStatus, restartEngine, State, type Status } from "./engine";
+import { useProject } from "./useProject";
+import { Workspace } from "./Workspace";
 
 const describe: Record<string, string> = {
   [State.StateStopped]: "Engine stopped",
@@ -14,7 +16,6 @@ const describe: Record<string, string> = {
 
 export default function App() {
   const [status, setStatus] = useState<Status | null>(null);
-  const [ping, setPing] = useState<string>("");
   const [restarting, setRestarting] = useState(false);
 
   useEffect(() => {
@@ -23,12 +24,9 @@ export default function App() {
     return off;
   }, []);
 
-  const sendPing = async () => {
-    const t0 = performance.now();
-    const reply = await callEngine("ping");
-    const ms = (performance.now() - t0).toFixed(2);
-    setPing(reply.ok ? `Round trip ${ms} ms` : `${reply.error?.code}: ${reply.error?.message}`);
-  };
+  const state = status?.state ?? State.StateStarting;
+  const ready = state === State.StateReady;
+  const session = useProject(ready);
 
   const restart = async () => {
     setRestarting(true);
@@ -39,28 +37,39 @@ export default function App() {
     }
   };
 
-  const state = status?.state ?? State.StateStarting;
   const canRetry = state === State.StateCrashed || state === State.StateFailed || state === State.StateIncompatible;
 
   return (
     <main>
       <h1>Sonora</h1>
-      <p role="status" aria-live="polite">
-        {describe[state] ?? state}
-        {state === State.StateReady && status ? ` (version ${status.serviceVersion}, protocol ${status.protocol})` : ""}
-      </p>
-      {status?.detail ? <p className="detail">{status.detail}</p> : null}
-      <div className="actions">
-        <button type="button" onClick={sendPing} disabled={state !== State.StateReady}>
-          Ping engine
-        </button>
-        {canRetry ? (
-          <button type="button" onClick={restart} disabled={restarting}>
-            {restarting ? "Restarting…" : "Restart engine"}
-          </button>
-        ) : null}
-      </div>
-      {ping ? <p>{ping}</p> : null}
+      {!ready ? (
+        <>
+          <p role="status" aria-live="polite">
+            {describe[state] ?? state}
+          </p>
+          {status?.detail ? <p className="detail">{status.detail}</p> : null}
+          {canRetry ? (
+            <button type="button" onClick={restart} disabled={restarting}>
+              {restarting ? "Restarting…" : "Restart engine"}
+            </button>
+          ) : null}
+        </>
+      ) : session.project && session.text !== null ? (
+        <Workspace
+          project={session.project}
+          text={session.text}
+          progress={session.progress}
+          transport={session.transport}
+          error={session.error}
+          onEdit={session.edit}
+          onPlay={session.play}
+          onPause={session.pause}
+          onStop={session.stop}
+          onRetryRender={session.retryRender}
+        />
+      ) : (
+        <p role="status">Loading project…</p>
+      )}
     </main>
   );
 }
