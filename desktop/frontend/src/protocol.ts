@@ -39,6 +39,11 @@ export interface RenderView {
   failure: { jobId: number; revision: number; message: string } | null;
 }
 
+export interface LoopRange {
+  start: number;
+  end: number;
+}
+
 export interface TransportView {
   playing: boolean;
   positionSeconds: number;
@@ -46,6 +51,9 @@ export interface TransportView {
   jobId: number | null;
   revision: number | null;
   current: boolean;
+  loop: LoopRange | null;
+  loopActive: boolean;
+  volume: number;
   deviceLost: boolean;
 }
 
@@ -58,6 +66,13 @@ export interface ProjectView {
   master: { gain: number };
   render: RenderView;
   transport: TransportView;
+}
+
+/** Waveform overview: `[min, max]` per equal span of the render. */
+export interface RenderPeaks {
+  jobId: number;
+  durationSeconds: number;
+  peaks: [number, number][];
 }
 
 export interface RenderProgress {

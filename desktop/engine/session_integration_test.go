@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"strings"
 	"sync"
@@ -36,6 +37,8 @@ type transportView struct {
 	PositionSeconds float64 `json:"positionSeconds"`
 	DurationSeconds float64 `json:"durationSeconds"`
 	Current         bool    `json:"current"`
+	LoopActive      bool    `json:"loopActive"`
+	Volume          float64 `json:"volume"`
 }
 
 type eventLog struct {
@@ -123,6 +126,33 @@ func TestRealServiceSession(t *testing.T) {
 	if view.Render.Latest == nil || view.Render.Latest.Revision != edited.Revision || !view.Render.Latest.Current {
 		t.Fatalf("second render not tagged with the edited revision: %+v (edit revision %d)", view.Render.Latest, edited.Revision)
 	}
+
+	peaks := call[struct {
+		JobID int          `json:"jobId"`
+		Peaks [][2]float64 `json:"peaks"`
+	}](t, sup, "render.peaks", map[string]any{"buckets": 512})
+	if len(peaks.Peaks) != 512 || peaks.JobID != view.Render.Latest.JobID {
+		t.Fatalf("peaks: job %d, %d buckets", peaks.JobID, len(peaks.Peaks))
+	}
+	sought := call[transportView](t, sup, "transport.seek", map[string]any{"seconds": 0.5})
+	looped := call[transportView](t, sup, "transport.setLoop", map[string]any{"loop": map[string]any{"start": 0.25, "end": 0.75}})
+	quiet := call[transportView](t, sup, "transport.setVolume", map[string]any{"volume": 0})
+	if sought.PositionSeconds != 0.5 || !looped.LoopActive || quiet.Volume != 0 {
+		t.Fatalf("seek %+v, loop %+v, volume %+v", sought, looped, quiet)
+	}
+	for method, params := range map[string]string{
+		"transport.seek":      `{"seconds":-1}`,
+		"transport.setLoop":   `{"loop":{"start":1,"end":1}}`,
+		"transport.setVolume": `{"volume":2}`,
+		"render.peaks":        `{"buckets":0}`,
+	} {
+		var remote *RemoteError
+		if _, err := sup.Call(context.Background(), method, json.RawMessage(params)); !errors.As(err, &remote) || remote.Code != "invalid_value" {
+			t.Fatalf("%s %s: %v", method, params, err)
+		}
+	}
+	call[transportView](t, sup, "transport.setLoop", map[string]any{"loop": nil})
+	call[transportView](t, sup, "transport.stop", map[string]any{})
 
 	if os.Getenv("SONORA_AUDIO_SMOKE") != "1" {
 		return

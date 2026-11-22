@@ -1,26 +1,25 @@
 // Interim workspace for the edit → render → play slice. Functional only;
 // the designed interface replaces it.
 import { useRef } from "react";
-import type { Diagnostic, ProjectView, RenderProgress, TransportView } from "./protocol";
+import type { Diagnostic, LoopRange, ProjectView, RenderPeaks, RenderProgress, TransportView } from "./protocol";
+import { clock, Transport } from "./Transport";
 
 interface Props {
   project: ProjectView;
   text: string;
   progress: RenderProgress | null;
   transport: TransportView | null;
+  peaks: RenderPeaks | null;
   error: string | null;
   onEdit: (text: string) => void;
   onPlay: () => void;
   onPause: () => void;
   onStop: () => void;
+  onSeek: (seconds: number) => void;
+  onLoop: (loop: LoopRange | null) => void;
+  onVolume: (volume: number) => void;
   onRetryRender: () => void;
 }
-
-const clock = (seconds: number) => {
-  const m = Math.floor(seconds / 60);
-  const s = (seconds % 60).toFixed(1).padStart(4, "0");
-  return `${m}:${s}`;
-};
 
 function renderStatus(project: ProjectView, progress: RenderProgress | null): string {
   const r = project.render;
@@ -46,7 +45,6 @@ export function Workspace(props: Props) {
 
   // Diagnostics describe the text the engine last saw.
   const checked = project.scoreText === text;
-  const playing = transport?.playing ?? false;
   const canPlay = project.render.latest !== null;
 
   const jumpTo = (d: Diagnostic) => {
@@ -108,23 +106,18 @@ export function Workspace(props: Props) {
         </ul>
       ) : null}
 
-      <div className="actions">
-        {playing ? (
-          <button type="button" onClick={props.onPause}>
-            Pause
-          </button>
-        ) : (
-          <button type="button" onClick={props.onPlay} disabled={!canPlay}>
-            Play
-          </button>
-        )}
-        <button type="button" onClick={props.onStop} disabled={!canPlay}>
-          Stop
-        </button>
-        <span>
-          {clock(transport?.positionSeconds ?? 0)} / {clock(transport?.durationSeconds ?? project.render.latest?.durationSeconds ?? 0)}
-        </span>
-      </div>
+      <Transport
+        transport={transport ?? project.transport}
+        peaks={props.peaks}
+        duration={project.render.latest?.durationSeconds ?? 0}
+        canPlay={canPlay}
+        onPlay={props.onPlay}
+        onPause={props.onPause}
+        onStop={props.onStop}
+        onSeek={props.onSeek}
+        onLoop={props.onLoop}
+        onVolume={props.onVolume}
+      />
     </section>
   );
 }

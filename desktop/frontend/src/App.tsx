@@ -60,11 +60,15 @@ export default function App() {
           text={session.text}
           progress={session.progress}
           transport={session.transport}
+          peaks={session.peaks}
           error={session.error}
           onEdit={session.edit}
           onPlay={session.play}
           onPause={session.pause}
           onStop={session.stop}
+          onSeek={session.seek}
+          onLoop={session.setLoop}
+          onVolume={session.setVolume}
           onRetryRender={session.retryRender}
         />
       ) : (
