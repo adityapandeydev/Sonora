@@ -1,11 +1,22 @@
+{-# OPTIONS_GHC -Wno-orphans #-}
 module SignalSpec (signalTests) where
 
+import Control.Exception (evaluate)
+import System.Mem (performMajorGC)
 import Test.QuickCheck
 import qualified Data.Vector.Storable as V
+import Sonora.Music.Composition (Control (..), Music (..), linearize)
+import Sonora.Music.Duration (BPM (..), eighth, half, quarter)
+import Sonora.Music.Interval (Interval (..))
+import Sonora.Music.Note (Articulation (..), Note (..), fff, mf, pp)
+import Sonora.Music.Pitch (a5, c3, e4, g4)
 import Sonora.Signal.Core
+import Sonora.Signal.Effects (chainEffects)
 import Sonora.Signal.Envelope
 import Sonora.Signal.Filter
 import Sonora.Signal.Oscillator
+import Sonora.Synth.Instrument (Instrument (..), bassSynth, leadSynth, pluckSynth)
+import Sonora.Synth.Synthesizer (masterLimiter, renderComposition, renderNoteEvent)
 
 testCfg :: AudioConfig
 testCfg = AudioConfig 44100 2
@@ -54,6 +65,60 @@ testFilterStability =
         isValidFrame (Frame l r) = isValidDouble l && isValidDouble r
     in V.all isValidFrame frames
 
+-- | Rendering a composition equals padding every note with silence up to its
+-- start and mixing them one after another.
+prop_compositionMatchesReference :: Property
+prop_compositionMatchesReference = forAll genMusic $ \music ->
+    forAll (elements [leadSynth, bassSynth, pluckSynth { instEffects = [] }]) $ \inst ->
+        let cfg = AudioConfig 2000 2
+            bpm = BPM 240
+            notes = map (renderNoteEvent bpm inst) (linearize noteDuration music)
+            reference = masterLimiter (chainEffects (instEffects inst) (foldl mixSignals emptySignal notes))
+        in counterexample (show music) $
+            runSignal (renderComposition bpm inst music) cfg == runSignal reference cfg
+
+-- | Gaps between notes are silent even when the memory they are rendered into
+-- was used before.
+testGapsAreSilent :: IO Bool
+testGapsAreSilent = and <$> mapM attempt [1 .. 20 :: Int]
+  where
+    inst = pluckSynth { instEffects = [] }
+    music = Sequential (Prim (Note c3 eighth mf Normal)) (Sequential (Rest 8) (Prim (Note c3 eighth mf Normal)))
+    cfg = AudioConfig 2000 2
+    attempt k = do
+        -- Leave used memory of many sizes behind for the renderer to reuse.
+        used <- mapM (evaluate . garbage) [ n * 1000 + k | n <- [1 .. 60] ]
+        _ <- evaluate (sum (map V.length used))
+        performMajorGC
+        out <- evaluate (runSignal (renderComposition (BPM 240) inst music) cfg)
+        return (V.all (== mempty) (V.slice 2000 10000 out))
+
+garbage :: Int -> V.Vector Frame
+garbage n = V.replicate n (Frame 7 7)
+{-# NOINLINE garbage #-}
+
+instance Show Instrument where
+    show = instName
+
+-- | Music with overlaps, rests, repeats of a start time, and nested controls.
+genMusic :: Gen (Music Note)
+genMusic = sized go
+  where
+    go n | n <= 4 = leaf
+         | otherwise = oneof
+            [ leaf
+            , Sequential <$> go (n `div` 3) <*> go (n `div` 3)
+            , Parallel <$> go (n `div` 3) <*> go (n `div` 3)
+            , Modify <$> control <*> go (n `div` 2)
+            ]
+    leaf = oneof
+        [ Rest <$> dur
+        , Prim <$> (Note <$> elements [c3, e4, g4, a5] <*> dur <*> elements [pp, mf, fff] <*> elements [Staccato, Normal, Tenuto, Legato]) ]
+    dur = elements [0, eighth, quarter, half]
+    control = elements
+        [ SetTempo (BPM 120), SetTempo (BPM 500), Transpose (Interval 7), ScaleVolume 0.5
+        , SetInstrument "chime", SetPan (-0.8) ]
+
 signalTests :: IO Bool
 signalTests = do
     putStrLn "--- Running DSP & Signal Processing Tests ---"
@@ -62,5 +127,8 @@ signalTests = do
     r3 <- quickCheckResult prop_mixEmptyIdentity
     putStrLn $ "  ADSR Termination Test:    " ++ if testEnvelopeTerminates then "PASSED" else "FAILED"
     putStrLn $ "  Filter Stability Test:    " ++ if testFilterStability then "PASSED" else "FAILED"
-    let allPassed = all isSuccess [r1, r2, r3] && testEnvelopeTerminates && testFilterStability
+    r4 <- quickCheckResult prop_compositionMatchesReference
+    gaps <- testGapsAreSilent
+    putStrLn $ "  Gaps Are Silent Test:     " ++ if gaps then "PASSED" else "FAILED"
+    let allPassed = gaps && all isSuccess [r1, r2, r3, r4] && testEnvelopeTerminates && testFilterStability
     return allPassed

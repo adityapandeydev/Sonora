@@ -48,7 +48,8 @@ import Sonora.Signal.Oscillator (Waveform (..))
 import Sonora.Synth.Instrument
 import Sonora.Synth.Voice
 
--- | One stage of an instrument's effect chain, applied in list order.
+-- | One stage of an instrument's effect chain. As in 'chainEffects', the last
+-- effect in a patch's list processes the sound first.
 data EffectSpec
     = DelayEffect !Double !Double !Double
       -- ^ Time in seconds, feedback (0 to 0.95), wet mix (0 to 1).
