@@ -8,6 +8,7 @@ import DeterminismSpec (determinismTests)
 import AudioSpec (audioTests)
 import ServiceSpec (serviceTests)
 import ProjectSpec (projectTests)
+import SessionSpec (sessionTests)
 
 main :: IO ()
 main = do
@@ -27,8 +28,10 @@ main = do
     p6 <- serviceTests
     putStrLn ""
     p7 <- projectTests
+    putStrLn ""
+    p8 <- sessionTests
     putStrLn "========================================================"
-    if p1 && p2 && p3 && p4 && p5 && p6 && p7
+    if p1 && p2 && p3 && p4 && p5 && p6 && p7 && p8
         then do
             putStrLn "  ALL TEST SUITES PASSED SUCCESSFULLY! (100%)"
             putStrLn "========================================================"

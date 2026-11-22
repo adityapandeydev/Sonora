@@ -12,6 +12,7 @@ import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy as BL
 import Data.Maybe (isJust)
 import Data.Text (Text)
+import qualified Data.Set as Set
 import System.Directory (findExecutable)
 import System.Environment (lookupEnv)
 import System.Exit (ExitCode (..))
@@ -62,12 +63,19 @@ data Session = Session
     }
 
 withSession :: Int -> (Session -> IO Bool) -> IO Bool
-withSession maxBytes act = do
+withSession maxBytes = withSessionSerial maxBytes []
+
+withSessionSerial :: Int -> [Text] -> (Session -> IO Bool) -> IO Bool
+withSessionSerial maxBytes serialNames act = do
     (inR, inW) <- createPipe
     (outR, outW) <- createPipe
     mapM_ (`hSetBinaryMode` True) [inW, outR]
     done <- newEmptyMVar :: IO (MVar (Either SomeException ExitReason))
-    let cfg = defaultServerConfig { configMaxMessageBytes = maxBytes, configMethods = diagnosticMethods }
+    let cfg = defaultServerConfig
+            { configMaxMessageBytes = maxBytes
+            , configMethods = diagnosticMethods
+            , configSerialMethods = Set.fromList serialNames
+            }
     _ <- forkIO (try (runServer cfg inR outW) >>= putMVar done)
     let sess = Session
             { send = \b -> BS.hPut inW b >> hFlush inW
@@ -100,9 +108,48 @@ check name t = do
 session :: (Session -> IO Bool) -> IO Bool
 session = withSession 4096
 
+serial :: (Session -> IO Bool) -> IO Bool
+serial = withSessionSerial 4096 ["diagnostic.sleep", "diagnostic.echo"]
+
 inProcessTests :: [(String, IO Bool)]
 inProcessTests =
-    [ ("Handshake negotiates version and lists methods", session $ \s -> do
+    [ ("Serial methods answer in arrival order", serial $ \s -> do
+        send s hello
+        send s (request "slow" "diagnostic.sleep" (object ["ms" .= (200 :: Int)]))
+        send s (request "fast" "diagnostic.echo" (object []))
+        rs <- recvN s 3
+        return $ case rs of
+            [_, a, b] -> isOk "slow" a && isOk "fast" b
+            _ -> False)
+
+    , ("Queued serial requests can be cancelled before they start", serial $ \s -> do
+        send s hello
+        send s (request "a" "diagnostic.sleep" (object ["ms" .= (300 :: Int)]))
+        send s (request "b" "diagnostic.sleep" (object ["ms" .= (300 :: Int)]))
+        send s (request "c" "cancel" (object ["target" .= ("b" :: Text)]))
+        rs <- recvN s 4
+        threadDelay 500000
+        send s (request "p" "ping" (object []))
+        after <- recv s
+        return $ case rs of
+            [_, x, y, z] -> isErr (Just "b") "cancelled" x
+                && isOk "c" y && path ["result", "cancelled"] y == Just (Bool True)
+                && isOk "a" z && maybe False (isOk "p") after
+            _ -> False)
+
+    , ("Cancelling the running serial request lets the queue continue", serial $ \s -> do
+        send s hello
+        send s (request "long" "diagnostic.sleep" (object ["ms" .= (5000 :: Int)]))
+        send s (request "next" "diagnostic.echo" (object ["k" .= (1 :: Int)]))
+        threadDelay 50000
+        send s (request "c" "cancel" (object ["target" .= ("long" :: Text)]))
+        rs <- recvN s 4
+        return $ case rs of
+            [_, x, y, z] -> isErr (Just "long") "cancelled" x && isOk "c" y
+                && isOk "next" z && path ["result", "k"] z == Just (Number 1)
+            _ -> False)
+
+    , ("Handshake negotiates version and lists methods", session $ \s -> do
         send s hello
         r <- recv s
         return $ case r of

@@ -7,6 +7,7 @@
 module Main (main) where
 
 import Control.Concurrent.MVar
+import Control.Exception (finally)
 import qualified Data.Map.Strict as Map
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
@@ -18,6 +19,7 @@ import System.IO
 import Paths_sonora (version)
 import Sonora.Service.Methods
 import Sonora.Service.Server
+import Sonora.Service.Session (closeSession, defaultSessionConfig, newSession)
 
 data Options = Options
     { optMaxMessageBytes :: !Int
@@ -39,17 +41,20 @@ main = do
     hSetEncoding stderr utf8
     hSetBuffering stderr LineBuffering
     logLock <- newMVar ()
+    session <- newSession defaultSessionConfig
     let logLine msg
             | optQuiet opts = return ()
             | otherwise = withMVar logLock $ \_ -> TIO.hPutStrLn stderr ("[sonora-service] " <> msg)
         methods
-            | optDiagnostics opts = applicationMethods `Map.union` diagnosticMethods
-            | otherwise           = applicationMethods
+            | optDiagnostics opts = applicationMethods session `Map.union` diagnosticMethods
+            | otherwise           = applicationMethods session
         cfg = defaultServerConfig
             { configMaxMessageBytes = max 1024 (optMaxMessageBytes opts)
             , configServiceVersion  = T.pack (showVersion version)
             , configMethods         = methods
+              -- Session operations change shared state; apply them in order.
+            , configSerialMethods   = Map.keysSet (applicationMethods session)
             , configLog             = logLine
             }
-    _ <- runServer cfg stdin stdout
+    _ <- runServer cfg stdin stdout `finally` closeSession session
     exitSuccess

@@ -5,10 +5,12 @@
 --
 -- * The first request must be @hello@ (the handshake).
 -- * @ping@, @cancel@ and @shutdown@ are built in and answered in order.
--- * Every other method runs on its own thread, so slow work never blocks
---   reading; @cancel@ stops an in-flight request, which then receives a
---   @cancelled@ error instead of its result. Exactly one response is ever
---   written per accepted request.
+-- * Every other method runs off the reading thread, so slow work never
+--   blocks reading. Methods listed in 'configSerialMethods' run one at a
+--   time in arrival order; the rest run concurrently. @cancel@ stops an
+--   in-flight or queued request, which then receives a @cancelled@ error
+--   instead of its result. Exactly one response is ever written per
+--   accepted request.
 -- * Lines longer than the configured limit are discarded without being
 --   buffered in full and answered with @message_too_large@.
 -- * End of input or @shutdown@ stops all in-flight work (answered with
@@ -30,13 +32,14 @@ module Sonora.Service.Server
 
 import Control.Concurrent
 import Control.Exception hiding (Handler)
-import Control.Monad (forM_, unless, void, when)
+import Control.Monad (forM_, forever, unless, void, when)
 import Data.Aeson
 import Data.IORef
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Map.Strict as Map
+import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import System.IO
@@ -58,6 +61,10 @@ data ServerConfig = ServerConfig
     , configServiceName     :: !Text
     , configServiceVersion  :: !Text
     , configMethods         :: !(Map.Map Text Handler)
+      -- | Methods that run one at a time, in the order they arrived, so
+      -- that state changes apply in sequence. Each is still cancellable,
+      -- including while queued. Other methods run concurrently.
+    , configSerialMethods   :: !(Set.Set Text)
     , configLog             :: Text -> IO ()
     }
 
@@ -67,6 +74,7 @@ defaultServerConfig = ServerConfig
     , configServiceName     = "sonora-service"
     , configServiceVersion  = "0.0.0"
     , configMethods         = Map.empty
+    , configSerialMethods   = Set.empty
     , configLog             = \_ -> return ()
     }
 
@@ -86,7 +94,9 @@ runServer cfg input output = do
     hSetBuffering output (BlockBuffering Nothing)
     nextLine <- newLineReader input (configMaxMessageBytes cfg)
     writeLock <- newMVar ()
-    inflight <- newMVar (Map.empty :: Map.Map RequestId ThreadId)
+    -- In-flight requests; Nothing marks a serial request still queued.
+    inflight <- newMVar (Map.empty :: Map.Map RequestId (Maybe ThreadId))
+    serialQueue <- newChan
     initialized <- newIORef False
 
     let logMsg = configLog cfg
@@ -107,8 +117,8 @@ runServer cfg input output = do
         -- Stop all in-flight requests, answering each one.
         stopAll code msg = do
             running <- modifyMVar inflight (\m -> return (Map.empty, Map.toList m))
-            forM_ running $ \(rid, tid) -> do
-                void (forkIO (killThread tid))
+            forM_ running $ \(rid, mtid) -> do
+                forM_ mtid (void . forkIO . killThread)
                 failure (Just rid) code msg
             return (length running)
 
@@ -118,7 +128,23 @@ runServer cfg input output = do
                 -- Registered before the worker can finish: it must take
                 -- this lock to claim the right to respond.
                 tid <- forkIO (worker rid handler (requestParams req))
-                return (Map.insert rid tid m)
+                return (Map.insert rid (Just tid) m)
+
+        enqueue req handler = do
+            modifyMVar_ inflight (return . Map.insert (requestId req) Nothing)
+            writeChan serialQueue (requestId req, handler, requestParams req)
+
+        -- Runs queued serial requests one at a time; a request cancelled
+        -- while queued is no longer registered and is skipped.
+        serialWorker = forever $ do
+            (rid, handler, params) <- readChan serialQueue
+            finished <- newEmptyMVar
+            started <- modifyMVar inflight $ \m -> case Map.lookup rid m of
+                Just Nothing -> do
+                    tid <- forkIO (worker rid handler params `finally` putMVar finished ())
+                    return (Map.insert rid (Just tid) m, True)
+                _ -> return (m, False)
+            when started (takeMVar finished)
 
         worker rid handler params = do
             outcome <- try $ do
@@ -163,8 +189,8 @@ runServer cfg input output = do
                 Right (target :: RequestId) -> do
                     found <- modifyMVar inflight (\m -> return (Map.delete target m, Map.lookup target m))
                     case found of
-                        Just tid -> do
-                            void (forkIO (killThread tid))
+                        Just mtid -> do
+                            forM_ mtid (void . forkIO . killThread)
                             failure (Just target) Cancelled "Request was cancelled"
                         Nothing -> return ()
                     respond (Just (requestId req)) (Right (object ["cancelled" .= maybe False (const True) found]))
@@ -189,7 +215,9 @@ runServer cfg input output = do
                     respond (Just rid) (Right (object []))
                     return (Just ShutdownRequested)
                 m -> case Map.lookup m (configMethods cfg) of
-                    Just handler -> spawn req handler >> return Nothing
+                    Just handler
+                        | Set.member m (configSerialMethods cfg) -> enqueue req handler >> return Nothing
+                        | otherwise -> spawn req handler >> return Nothing
                     Nothing -> do
                         failure (Just rid) MethodNotFound ("Unknown method: " <> m)
                         return Nothing
@@ -212,7 +240,8 @@ runServer cfg input output = do
                         Right req -> dispatch req >>= maybe loop return
 
     logMsg "service started"
-    reason <- loop
+    serialThread <- forkIO serialWorker
+    reason <- loop `finally` killThread serialThread
     logMsg ("service stopping: " <> T.pack (show reason))
     return reason
   where

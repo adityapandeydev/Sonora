@@ -68,6 +68,7 @@ library
         Sonora.Project.Score
         Sonora.Project.Update
         Sonora.Project.Compile
+        Sonora.Project.Render
         Sonora.Audio.Backend
         Sonora.Audio.Mixer
         Sonora.Audio.Device
@@ -75,6 +76,7 @@ library
         Sonora.Service.Protocol
         Sonora.Service.Server
         Sonora.Service.Methods
+        Sonora.Service.Session
     -- Audio device access: WASAPI through direct FFI to Windows system DLLs.
     if os(windows)
         other-modules:   Sonora.Audio.Wasapi
@@ -144,6 +146,7 @@ test-suite sonora-test
         AudioSpec
         ServiceSpec
         ProjectSpec
+        SessionSpec
     build-tool-depends:
         sonora:sonora-service
     build-depends:

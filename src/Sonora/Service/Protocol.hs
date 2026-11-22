@@ -71,6 +71,10 @@ data ErrorCode
     | Cancelled
     | ShuttingDown
     | InternalError
+    | UnknownTrack        -- ^ A command named a track the project does not have.
+    | InvalidValue        -- ^ A command value is out of range; data lists the fields.
+    | NoRender            -- ^ Playback requested before any render has finished.
+    | AudioUnavailable    -- ^ The audio output device could not be used.
     deriving (Eq, Show, Enum, Bounded)
 
 errorCodeText :: ErrorCode -> Text
@@ -87,6 +91,10 @@ errorCodeText c = case c of
     Cancelled          -> "cancelled"
     ShuttingDown       -> "shutting_down"
     InternalError      -> "internal_error"
+    UnknownTrack       -> "unknown_track"
+    InvalidValue       -> "invalid_value"
+    NoRender           -> "no_render"
+    AudioUnavailable   -> "audio_unavailable"
 
 -- | A structured failure reported to the client.
 data ServiceError = ServiceError
