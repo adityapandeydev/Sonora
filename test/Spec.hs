@@ -10,6 +10,7 @@ import AudioSpec (audioTests)
 import ServiceSpec (serviceTests)
 import ProjectSpec (projectTests)
 import SessionSpec (sessionTests)
+import LayoutSpec (layoutTests)
 
 main :: IO ()
 main = do
@@ -32,8 +33,10 @@ main = do
     p7 <- projectTests
     putStrLn ""
     p8 <- sessionTests
+    putStrLn ""
+    p9 <- layoutTests
     putStrLn "========================================================"
-    if p1 && p2 && p3 && p4 && p5 && p6 && p7 && p8
+    if p1 && p2 && p3 && p4 && p5 && p6 && p7 && p8 && p9
         then do
             putStrLn "  ALL TEST SUITES PASSED SUCCESSFULLY! (100%)"
             putStrLn "========================================================"

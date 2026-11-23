@@ -70,6 +70,7 @@ library
         Sonora.Project.Update
         Sonora.Project.Compile
         Sonora.Project.Render
+        Sonora.Project.Layout
         Sonora.Audio.Backend
         Sonora.Audio.Mixer
         Sonora.Audio.Device
@@ -148,6 +149,7 @@ test-suite sonora-test
         ServiceSpec
         ProjectSpec
         SessionSpec
+        LayoutSpec
     build-tool-depends:
         sonora:sonora-service
     build-depends:

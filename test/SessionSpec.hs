@@ -391,7 +391,7 @@ scenarios =
                 && maybe False (\p -> case p of { Array a -> length a == 100; _ -> False }) (path ["peaks"] v)) r)
 
     , ("Every state-changing method is serial", withHarness fakes $ \h ->
-        return (Map.keysSet (applicationMethods (hSession h)) == Set.insert "render.peaks" serialMethods))
+        return (Map.keysSet (applicationMethods (hSession h)) == Set.insert "project.timing" (Set.insert "render.peaks" serialMethods)))
 
     , ("Project commands report structured errors and re-render on success", withHarness fakes $ \h -> do
         _ <- startRender (hSession h) (hEmit h)

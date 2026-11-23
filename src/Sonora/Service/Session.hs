@@ -46,6 +46,7 @@ module Sonora.Service.Session
     , setVolume
     , transportView
     , renderPeaks
+    , scoreTiming
     , maxPeakBuckets
     , minLoopSeconds
     ) where
@@ -64,6 +65,7 @@ import GHC.Clock (getMonotonicTime)
 import Sonora.Audio.Backend
 import Sonora.Audio.Device (openDeviceBackend)
 import Sonora.Project.Compile
+import Sonora.Project.Layout (outline, songInfo, timing)
 import Sonora.Project.Render (renderCompiled)
 import Sonora.Project.Score (scorePatches)
 import Sonora.Project.Types
@@ -156,6 +158,7 @@ data St = St
     , stLoop     :: !(Maybe (Double, Double)) -- ^ Loop range in seconds.
     , stVolume   :: !Double
     , stLost     :: !Bool                  -- ^ The device went away; cleared by reopening it.
+    , stValidSince :: !Revision            -- ^ Revision at which the valid score last changed.
     }
 
 data Session = Session
@@ -177,6 +180,7 @@ newSession cfg = Session cfg <$> newMVar St
     , stLoop     = Nothing
     , stVolume   = 1
     , stLost     = False
+    , stValidSince = Revision 0
     }
 
 -- | Stop rendering and playback and release the audio device.
@@ -203,6 +207,7 @@ projectViewLocked st = do
             , "name"             .= trackScoreName t
             , "instrument"       .= trackScoreInstrument t
             , "patchSource"      .= sourceText (snd (resolvePatch declared t))
+            , "patch"            .= fst (resolvePatch declared t)
             , "hasPatchOverride" .= isJust (trackPatchOverride t)
             , "mix"              .= trackMix t
             ]
@@ -212,6 +217,9 @@ projectViewLocked st = do
         , "scoreIsCurrent" .= scoreIsCurrent p
         , "diagnostics"    .= projectDiagnostics p
         , "tracks"         .= map trackView (projectTracks p)
+        , "song"           .= fmap (songInfo . validAst) (projectValidScore p)
+        , "outline"        .= outline (projectScoreText p)
+        , "timingVersion"  .= stValidSince st
         , "master"         .= projectMaster p
         , "render"         .= renderView st
         , "transport"      .= transport
@@ -266,7 +274,9 @@ applyProjectCommand s emit cmd = modifyMVar (sState s) $ \st ->
                 detail = if null params then Nothing else Just (object ["params" .= params])
             in return (st, Left (ServiceError ecode msg detail))
         Right p -> do
-            st' <- startRenderLocked s emit False st { stProject = p }
+            let changed = fmap validText (projectValidScore p) /= fmap validText (projectValidScore (stProject st))
+                since = if changed then projectRevision p else stValidSince st
+            st' <- startRenderLocked s emit False st { stProject = p, stValidSince = since }
             v <- projectViewLocked st'
             return (st', Right v)
 
@@ -351,6 +361,19 @@ swapIn emit st = case (stAudio st, stLoaded st, stFinished st) of
         emitTransport emit st'
         return st'
     _ -> return st
+
+-------------------------------------------------------------------------------
+-- Timing
+
+-- | When each line of the last valid score sounds, tagged with the
+-- @timingVersion@ of the project view it belongs to.
+scoreTiming :: Session -> IO Value
+scoreTiming s = do
+    st <- readMVar (sState s)
+    return $ object
+        [ "version" .= stValidSince st
+        , "tracks"  .= maybe [] id (timing (stProject st))
+        ]
 
 -------------------------------------------------------------------------------
 -- Waveform

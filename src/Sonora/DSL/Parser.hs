@@ -253,8 +253,8 @@ trackParser = do
     void (skipSpaces >> char ':' >> ws)
     let instName = maybe tName id mInst
 
-    items <- many1 (try (itemParser <* ws))
-    return (ASTTrack tName instName items)
+    located <- many1 (try ((,) <$> (sourceLine <$> getPosition) <*> itemParser <* ws))
+    return (ASTTrack tName instName (map snd located) (map fst located))
 
 -- | Parse top-level directives (tempo, time, title).
 directiveParser :: Parser (Either (String, String) (ASTSong -> ASTSong))

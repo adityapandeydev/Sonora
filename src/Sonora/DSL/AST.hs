@@ -44,6 +44,7 @@ data ASTTrack = ASTTrack
     { astTrackName       :: !String
     , astTrackInstrument :: !String
     , astTrackItems      :: ![ASTItem]
+    , astTrackItemLines  :: ![Int]  -- ^ Source line of each item (1-based).
     } deriving (Eq, Show, Generic)
 
 -- | The top-level composition document parsed from a .sonora file.

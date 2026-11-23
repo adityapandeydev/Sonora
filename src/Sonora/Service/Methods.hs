@@ -31,6 +31,7 @@ import Sonora.Service.Session
 --   @transport.setVolume@ @{volume}@ → transport status; out-of-range values
 --   are @invalid_value@.
 -- * @render.peaks@ @{buckets}@ → waveform overview of the latest render.
+-- * @project.timing@ → when each line of the last valid score sounds.
 --
 -- Events: @render.started@, @render.progress@, @render.finished@,
 -- @render.failed@, @render.cancelled@ (all carry @jobId@ and @revision@),
@@ -54,6 +55,7 @@ applicationMethods s = Map.fromList
     , ("transport.setLoop", \ctx params -> withParams loopParam params (setLoop s (contextEmit ctx)))
     , ("transport.setVolume", \ctx params -> withParams (.: "volume") params (setVolume s (contextEmit ctx)))
     , ("render.peaks", \_ params -> withParams (.: "buckets") params (renderPeaks s))
+    , ("project.timing", \_ _ -> Right <$> scoreTiming s)
     ]
 
 withParams :: (Object -> Parser a) -> Value -> (a -> IO (Either ServiceError Value)) -> IO (Either ServiceError Value)
@@ -68,7 +70,7 @@ loopParam o = do
         _ -> Just <$> withObject "loop" (\l -> (,) <$> l .: "start" <*> l .: "end") v
 
 -- | Application methods that must run in arrival order: everything that
--- reads or changes shared state. Computing an overview does neither.
+-- reads or changes shared state. Overviews and timing only read a snapshot.
 serialMethods :: Set.Set Text
 serialMethods = Set.fromList
     [ "project.get", "project.setScore", "project.apply", "render.start", "render.cancel"
