@@ -5,9 +5,73 @@ import { carryForward, clock, MIN_LOOP_SECONDS, moveLoop } from "./playback";
 import { LoopIcon, PauseIcon, PlayIcon, StopIcon, VolumeIcon } from "./ui/icons";
 import { Slider } from "./ui/Slider";
 
+/** One track's row in the timeline. */
+export interface Lane {
+  id: string;
+  /** A CSS colour, such as var(--track-0). */
+  colour: string;
+  /** [start s, end s, MIDI pitch, line] */
+  notes: [number, number, number, number][];
+  selected: boolean;
+}
+
+const LANE_HEIGHT = 12;
+/** All lanes together never take more than this; rows get thinner instead. */
+const LANES_MAX = 96;
+
+function Lanes({ lanes, duration }: { lanes: Lane[]; duration: number }) {
+  const canvas = useRef<HTMLCanvasElement>(null);
+  useEffect(() => {
+    const el = canvas.current;
+    if (!el) return;
+    const draw = () => {
+      const g = el.getContext("2d");
+      if (!g) return;
+      const r = window.devicePixelRatio || 1;
+      const w = el.clientWidth;
+      el.width = Math.round(w * r);
+      el.height = Math.round(el.clientHeight * r);
+      g.scale(r, r);
+      const style = getComputedStyle(el);
+      const row = Math.min(LANE_HEIGHT, LANES_MAX / lanes.length);
+      lanes.forEach((lane, i) => {
+        const y = i * row;
+        if (lane.selected) {
+          g.fillStyle = style.getPropertyValue("--sel-soft");
+          g.fillRect(0, y, w, row);
+        }
+        if (lane.notes.length === 0 || duration <= 0) return;
+        const pitches = lane.notes.map((n) => n[2]);
+        const lo = Math.min(...pitches);
+        const hi = Math.max(...pitches);
+        g.fillStyle = style.getPropertyValue(lane.colour.slice(4, -1)) || style.color;
+        for (const [s, e, p] of lane.notes) {
+          const x = (s / duration) * w;
+          const pad = row >= 8 ? 2 : 1;
+          const bar = row >= 8 ? 2 : 1;
+          const yy = y + pad + (hi === lo ? (row - 2 * pad - bar) / 2 : ((hi - p) / (hi - lo)) * (row - 2 * pad - bar));
+          g.fillRect(x, yy, Math.max(1.5, ((e - s) / duration) * w - 1), bar);
+        }
+      });
+    };
+    draw();
+    const resize = new ResizeObserver(draw);
+    resize.observe(el);
+    const look = window.matchMedia("(prefers-color-scheme: dark)");
+    look.addEventListener("change", draw);
+    return () => {
+      resize.disconnect();
+      look.removeEventListener("change", draw);
+    };
+  }, [lanes, duration]);
+  if (lanes.length === 0) return null;
+  return <canvas ref={canvas} className="lanes" style={{ height: Math.min(lanes.length * LANE_HEIGHT, LANES_MAX) }} aria-hidden="true" />;
+}
+
 interface Props {
   transport: TransportView;
   peaks: RenderPeaks | null;
+  lanes: Lane[];
   duration: number;
   canPlay: boolean;
   /** What the render is doing, in words. */
@@ -24,7 +88,7 @@ const VOLUME = { min: 0, max: 1, step: 0.01 };
 const percent = (v: number) => `${Math.round(v * 100)}%`;
 
 /** The engine's position, carried forward between its updates while playing. */
-function usePosition(transport: TransportView, duration: number): number {
+export function usePosition(transport: TransportView, duration: number): number {
   const [now, setNow] = useState(() => performance.now());
   const received = useRef({ transport, at: performance.now() });
   if (received.current.transport !== transport) received.current = { transport, at: performance.now() };
@@ -89,6 +153,7 @@ function Waveform({ peaks }: { peaks: RenderPeaks | null }) {
 }
 
 interface TimelineProps {
+  lanes: Lane[];
   position: number;
   duration: number;
   peaks: RenderPeaks | null;
@@ -97,7 +162,7 @@ interface TimelineProps {
   onLoop: (loop: LoopRange) => void;
 }
 
-function Timeline({ position, duration, peaks, loop, onSeek, onLoop }: TimelineProps) {
+function Timeline({ lanes, position, duration, peaks, loop, onSeek, onLoop }: TimelineProps) {
   const strip = useRef<HTMLDivElement>(null);
   // The loop while one of its ends is being dragged. Also kept in a ref, as
   // the pointer can be released before the last move has been rendered.
@@ -180,6 +245,7 @@ function Timeline({ position, duration, peaks, loop, onSeek, onLoop }: TimelineP
       {shownLoop ? (
         <div className="loop-range" style={{ left: at(shownLoop.start), right: `calc(100% - ${at(shownLoop.end)})` }} />
       ) : null}
+      <Lanes lanes={lanes} duration={duration} />
       <Waveform peaks={peaks} />
       {shownLoop
         ? (["start", "end"] as const).map((which) => (
@@ -211,6 +277,7 @@ export function Transport(props: Props) {
   return (
     <>
       <Timeline
+        lanes={props.lanes}
         position={position}
         duration={duration}
         peaks={props.peaks}
@@ -223,18 +290,20 @@ export function Transport(props: Props) {
           type="button"
           className="button primary"
           aria-label={transport.playing ? "Pause" : "Play"}
+          title={`${transport.playing ? "Pause" : "Play"} (Space or Ctrl+Space)`}
           disabled={!canPlay}
           onClick={transport.playing ? props.onPause : props.onPlay}
         >
           {transport.playing ? <PauseIcon /> : <PlayIcon />}
         </button>
-        <button type="button" className="button square" aria-label="Stop" disabled={!canPlay} onClick={props.onStop}>
+        <button type="button" className="button square" aria-label="Stop" title="Stop (Ctrl+.)" disabled={!canPlay} onClick={props.onStop}>
           <StopIcon />
         </button>
         <button
           type="button"
           className="button square"
           aria-label="Loop"
+          title="Loop the whole song. Ctrl+L loops the bar at the caret."
           aria-pressed={transport.loopActive}
           disabled={!canPlay || duration < MIN_LOOP_SECONDS}
           onClick={() => props.onLoop(transport.loopActive ? null : { start: 0, end: duration })}

@@ -42,7 +42,12 @@ export default function App() {
   return (
     <div className={open ? "app ready" : "app"}>
       <header className="top">
-        <h1>Sonora</h1>
+        <h1 title={open && project.song ? project.song.title : "Sonora"}>{open && project.song ? project.song.title : "Sonora"}</h1>
+        {open && project.song ? (
+          <span className="meta">
+            {Math.round(project.song.bpm * 10) / 10} bpm, {project.song.timeSignature.join("/")}
+          </span>
+        ) : null}
         <span className={`state ${banner.tone}`} role="status">
           {banner.words}
         </span>
@@ -54,6 +59,7 @@ export default function App() {
           progress={session.progress}
           transport={session.transport}
           peaks={session.peaks}
+          timing={session.timing}
           error={session.error}
           onEdit={session.edit}
           onPlay={session.play}

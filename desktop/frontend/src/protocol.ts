@@ -21,7 +21,60 @@ export interface TrackView {
   instrument: string;
   patchSource: "override" | "score" | "preset" | "default";
   hasPatchOverride: boolean;
+  /** The sound the track plays with, after overrides and fallbacks. */
+  patch: Patch;
   mix: TrackMix;
+}
+
+export type Waveform = { type: "sine" | "triangle" | "saw" | "whiteNoise" | "pinkNoise" } | { type: "square"; duty: number };
+
+export interface Envelope {
+  attack: number;
+  decay: number;
+  sustain: number;
+  release: number;
+  curve: "linear" | "exponential";
+}
+
+export type Effect =
+  | { type: "delay"; time: number; feedback: number; mix: number }
+  | { type: "reverb"; roomSize: number; mix: number }
+  | { type: "chorus"; rate: number; depth: number; mix: number }
+  | { type: "distortion"; drive: number }
+  | { type: "tremolo"; rate: number; depth: number };
+
+export interface Patch {
+  name: string;
+  oscillators: { waveform: Waveform; level: number; semitones: number; cents: number; phase: number }[];
+  filter: { mode: "lowpass" | "highpass" | "bandpass" | "notch"; cutoff: number; resonance: number; envelopeAmount: number; envelope: Envelope };
+  amplitudeEnvelope: Envelope;
+  /** The engine applies these last to first. */
+  effects: Effect[];
+}
+
+export interface SongInfo {
+  title: string;
+  bpm: number;
+  timeSignature: [number, number];
+  beatsPerBar: number;
+}
+
+/** Track blocks in the current text (1-based lines, inclusive). */
+export interface Outline {
+  lines: number;
+  tracks: { name: string; header: number; last: number }[];
+}
+
+/** Per track: [line, start s, end s, start beat] and [start s, end s, MIDI pitch, line]. */
+export interface TrackTiming {
+  track: string;
+  lines: [number, number, number, number][];
+  notes: [number, number, number, number][];
+}
+
+export interface ScoreTiming {
+  version: number;
+  tracks: TrackTiming[];
 }
 
 export interface FinishedRender {
@@ -63,6 +116,11 @@ export interface ProjectView {
   scoreIsCurrent: boolean;
   diagnostics: Diagnostic[];
   tracks: TrackView[];
+  /** From the last valid score. */
+  song: SongInfo | null;
+  outline: Outline;
+  /** Changes when the last valid score changes; matches ScoreTiming.version. */
+  timingVersion: number;
   master: { gain: number };
   render: RenderView;
   transport: TransportView;

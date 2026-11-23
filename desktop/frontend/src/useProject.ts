@@ -3,7 +3,7 @@
 // this hook only keeps the latest view of it and the local editor text.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { EngineError, onEngineEvent, request } from "./engine";
-import type { LoopRange, ProjectView, RenderPeaks, RenderProgress, TransportView } from "./protocol";
+import type { LoopRange, ProjectView, RenderPeaks, RenderProgress, ScoreTiming, TransportView } from "./protocol";
 
 /** Idle time after typing before the engine validates the score. */
 export const VALIDATE_AFTER_MS = 250;
@@ -22,6 +22,7 @@ export function useProject(ready: boolean) {
   const [transport, setTransport] = useState<TransportView | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [peaks, setPeaks] = useState<RenderPeaks | null>(null);
+  const [timing, setTiming] = useState<ScoreTiming | null>(null);
   const shownRevision = useRef(-1);
   const timer = useRef<number | undefined>(undefined);
 
@@ -49,6 +50,7 @@ export function useProject(ready: boolean) {
       setProgress(null);
       setTransport(null);
       setPeaks(null);
+      setTiming(null);
       return;
     }
     const load = request<ProjectView>("project.get");
@@ -118,6 +120,17 @@ export function useProject(ready: boolean) {
     };
   }, [latestJob, report]);
 
+  // Fetch line timing whenever the playable score changes.
+  const timingVersion = project?.timingVersion ?? null;
+  useEffect(() => {
+    if (timingVersion === null) return;
+    const load = request<ScoreTiming>("project.timing");
+    load.then(setTiming).catch(report);
+    return () => {
+      load.cancel();
+    };
+  }, [timingVersion, report]);
+
   // Dragging a slider produces many values: send one at a time and only the
   // newest of those that arrived meanwhile.
   const dragging = useRef(new Map<string, { busy: boolean; next: unknown }>());
@@ -155,6 +168,7 @@ export function useProject(ready: boolean) {
     progress,
     transport,
     peaks,
+    timing,
     error,
     edit,
     play: () => transportCommand("transport.play"),

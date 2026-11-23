@@ -55,6 +55,14 @@
   --err: #b3122a;
   --err-soft: #fde4e6;
   --wave: #7d8bab;
+
+  /* Track identity: at least 3:1 against panels; always shown with names. */
+  --track-0: #8a4b00;
+  --track-1: #1a6b5c;
+  --track-2: #8f2a86;
+  --track-3: #2856a8;
+  --track-4: #6b5a00;
+  --track-5: #a1303f;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -86,5 +94,12 @@
     --err: #ff8f8f;
     --err-soft: #4d1d24;
     --wave: #9b7a77;
+
+    --track-0: #f0b27a;
+    --track-1: #86d1bf;
+    --track-2: #e3a6dd;
+    --track-3: #9fbaf2;
+    --track-4: #d6c56a;
+    --track-5: #ff9fa8;
   }
 }
