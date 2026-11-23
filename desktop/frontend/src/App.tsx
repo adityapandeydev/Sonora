@@ -1,17 +1,15 @@
-// Placeholder shell: engine connection plus the interim workspace. The
-// designed product interface replaces it.
 import { useEffect, useState } from "react";
 import { engineStatus, onEngineStatus, restartEngine, State, type Status } from "./engine";
 import { useProject } from "./useProject";
-import { Workspace } from "./Workspace";
+import { scoreState, Workspace } from "./Workspace";
 
 const describe: Record<string, string> = {
   [State.StateStopped]: "Engine stopped",
-  [State.StateStarting]: "Starting engine…",
-  [State.StateReady]: "Engine ready",
-  [State.StateCrashed]: "Engine stopped unexpectedly",
-  [State.StateIncompatible]: "Engine version is incompatible",
-  [State.StateFailed]: "Engine could not start",
+  [State.StateStarting]: "Starting the engine",
+  [State.StateReady]: "Opening the project",
+  [State.StateCrashed]: "The engine stopped unexpectedly",
+  [State.StateIncompatible]: "The engine does not match this version of Sonora",
+  [State.StateFailed]: "The engine could not start",
 };
 
 export default function App() {
@@ -25,8 +23,8 @@ export default function App() {
   }, []);
 
   const state = status?.state ?? State.StateStarting;
-  const ready = state === State.StateReady;
-  const session = useProject(ready);
+  const session = useProject(state === State.StateReady);
+  const broken = state === State.StateCrashed || state === State.StateFailed || state === State.StateIncompatible;
 
   const restart = async () => {
     setRestarting(true);
@@ -37,27 +35,22 @@ export default function App() {
     }
   };
 
-  const canRetry = state === State.StateCrashed || state === State.StateFailed || state === State.StateIncompatible;
+  const { project, text } = session;
+  const open = state === State.StateReady && project !== null && text !== null;
+  const banner = open ? scoreState(project, text) : { tone: broken ? "bad" : "", words: describe[state] ?? state };
 
   return (
-    <main>
-      <h1>Sonora</h1>
-      {!ready ? (
-        <>
-          <p role="status" aria-live="polite">
-            {describe[state] ?? state}
-          </p>
-          {status?.detail ? <p className="detail">{status.detail}</p> : null}
-          {canRetry ? (
-            <button type="button" onClick={restart} disabled={restarting}>
-              {restarting ? "Restarting…" : "Restart engine"}
-            </button>
-          ) : null}
-        </>
-      ) : session.project && session.text !== null ? (
+    <div className={open ? "app ready" : "app"}>
+      <header className="top">
+        <h1>Sonora</h1>
+        <span className={`state ${banner.tone}`} role="status">
+          {banner.words}
+        </span>
+      </header>
+      {open ? (
         <Workspace
-          project={session.project}
-          text={session.text}
+          project={project}
+          text={text}
           progress={session.progress}
           transport={session.transport}
           peaks={session.peaks}
@@ -72,8 +65,17 @@ export default function App() {
           onRetryRender={session.retryRender}
         />
       ) : (
-        <p role="status">Loading project…</p>
+        <main className="message">
+          <p>{banner.words}.</p>
+          {status?.detail ? <p className="mono">{status.detail}</p> : null}
+          {session.error ? <p className="mono">{session.error}</p> : null}
+          {broken ? (
+            <button type="button" className="button" onClick={restart} disabled={restarting}>
+              {restarting ? "Restarting" : "Restart engine"}
+            </button>
+          ) : null}
+        </main>
       )}
-    </main>
+    </div>
   );
 }

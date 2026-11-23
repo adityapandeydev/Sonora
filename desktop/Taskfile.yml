@@ -52,10 +52,11 @@ tasks:
       - task: typecheck
 
   typecheck:
-    summary: Type-checks the frontend
+    summary: Type-checks and tests the frontend
     dir: frontend
     deps:
       - task: common:install:frontend:deps
       - task: common:generate:bindings
     cmds:
       - npm run typecheck
+      - npm test

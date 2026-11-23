@@ -71,8 +71,8 @@ func main() {
 		Title:     "Sonora",
 		Width:     1280,
 		Height:    800,
-		MinWidth:  960,
-		MinHeight: 600,
+		MinWidth:  880,
+		MinHeight: 480,
 		URL:       "/",
 	})
 

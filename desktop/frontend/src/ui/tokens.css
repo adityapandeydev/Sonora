@@ -1,0 +1,90 @@
+/* Design values. Components use these and nothing else for colour, type,
+   spacing, and motion. Two looks follow the system setting: "Rehearsal"
+   (light) and "House lights" (dark). */
+:root {
+  color-scheme: light;
+
+  /* Type */
+  --sans: "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  --mono: "Cascadia Mono", "Cascadia Code", Consolas, monospace;
+  --text-s: 0.71875rem; /* 11.5px */
+  --text: 0.8125rem; /* 13px */
+  --text-l: 0.9375rem; /* 15px */
+  --text-xl: 1.125rem; /* 18px */
+
+  /* Space */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 10px;
+  --space-4: 14px;
+
+  /* Size and shape */
+  --control: 30px;
+  --control-l: 36px;
+  --slider: 18px;
+  --thumb: 14px;
+  --track: 5px;
+  --radius: 6px;
+
+  /* Motion: state changes only, never on keyboard actions. */
+  --ease: cubic-bezier(0.23, 1, 0.32, 1);
+  --fast: 120ms;
+
+  /* Rehearsal */
+  --shell: #1d2a4d;
+  --shell-2: #2a3a63;
+  --on-shell: #eef2fb;
+  --on-shell-2: #b9c5e3;
+  --shell-line: #3a4b78;
+  --page: #fbfcfe;
+  --panel: #eef2f8;
+  --panel-2: #e3e9f3;
+  --line: #cdd6e6;
+  --control-line: #6f7d9c;
+  --ink: #18213a;
+  --ink-2: #4d5a78;
+  --ink-3: #515d7a;
+  --sel: #1f5fd0;
+  --sel-soft: #dce8fd;
+  --on-sel: #ffffff;
+  --now: #c8202f;
+  --now-soft: #fde4e4;
+  --ok: #12704a;
+  --warn: #8a5300;
+  --warn-soft: #fff0d2;
+  --err: #b3122a;
+  --err-soft: #fde4e6;
+  --wave: #7d8bab;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    /* House lights */
+    --shell: #421627;
+    --shell-2: #5a2238;
+    --on-shell: #fdeee2;
+    --on-shell-2: #e2b9b4;
+    --shell-line: #74364d;
+    --page: #211318;
+    --panel: #2c1a21;
+    --panel-2: #38222b;
+    --line: #513440;
+    --control-line: #94707a;
+    --ink: #f9ebe1;
+    --ink-2: #d5b9b3;
+    --ink-3: #b5948f;
+    --sel: #f2b866;
+    --sel-soft: #4b3423;
+    --on-sel: #2a1706;
+    --now: #ff8f70;
+    --now-soft: #4f2620;
+    --ok: #7fd6a4;
+    --warn: #f2b866;
+    --warn-soft: #463019;
+    --err: #ff8f8f;
+    --err-soft: #4d1d24;
+    --wave: #9b7a77;
+  }
+}

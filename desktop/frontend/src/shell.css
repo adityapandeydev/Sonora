@@ -1,0 +1,301 @@
+/* Window layout. The middle is interim until the sound-led workspace. */
+.app {
+  height: 100%;
+  display: grid;
+  grid-template-rows: 46px minmax(0, 1fr);
+}
+
+.app.ready {
+  grid-template-rows: 46px minmax(0, 1fr) 64px 52px;
+}
+
+.top {
+  display: flex;
+  align-items: center;
+  gap: var(--space-4);
+  min-width: 0;
+  padding: 0 var(--space-4);
+  background: var(--shell);
+  color: var(--on-shell);
+}
+
+.top h1 {
+  margin: 0;
+  font-size: var(--text-l);
+  font-weight: 600;
+}
+
+.top .state {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--on-shell-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.top .state::before {
+  content: "";
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.top .state.good::before {
+  background: #7fe0ad;
+}
+
+.top .state.bad::before {
+  background: #ff9aa5;
+}
+
+.message {
+  padding: 24px var(--space-4);
+  display: grid;
+  gap: var(--space-3);
+  align-content: start;
+  justify-items: start;
+}
+
+.message p {
+  margin: 0;
+}
+
+.mono {
+  font-family: var(--mono);
+  white-space: pre-wrap;
+}
+
+/* Score */
+.score-pane {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.score-pane textarea {
+  flex: 1;
+  min-height: 0;
+  width: 100%;
+  resize: none;
+  border: 0;
+  padding: var(--space-3) var(--space-4) 24px;
+  background: var(--page);
+  color: var(--ink);
+  caret-color: var(--sel);
+  font: 400 0.84375rem / 21px var(--mono);
+}
+
+.score-pane textarea:focus-visible {
+  outline-offset: -2px;
+}
+
+.problems {
+  max-height: 40%;
+  overflow: auto;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+
+.problems ul {
+  margin: 0;
+  padding: var(--space-1) 0;
+  list-style: none;
+}
+
+.problems button {
+  display: grid;
+  grid-template-columns: 110px minmax(0, 1fr);
+  gap: var(--space-3);
+  width: 100%;
+  padding: 5px var(--space-4);
+  border: 0;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.problems button:disabled {
+  cursor: default;
+}
+
+.problems b {
+  font-weight: 600;
+  color: var(--err);
+}
+
+.problems .warning b {
+  color: var(--warn);
+}
+
+.problems span {
+  white-space: pre-wrap;
+}
+
+@media (hover: hover) {
+  .problems button:hover:not(:disabled) {
+    background: var(--panel-2);
+  }
+}
+
+.notice {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: 6px var(--space-4);
+  background: var(--err-soft);
+  color: var(--err);
+}
+
+/* Timeline */
+.timeline {
+  position: relative;
+  overflow: hidden;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+  cursor: text;
+  touch-action: none;
+}
+
+.timeline:focus-visible {
+  outline-offset: -2px;
+}
+
+.timeline[aria-disabled="true"] {
+  cursor: default;
+}
+
+.waveform {
+  position: absolute;
+  inset: 6px 0;
+  width: 100%;
+  height: calc(100% - 12px);
+  color: var(--wave);
+}
+
+.playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--now);
+  pointer-events: none;
+}
+
+.playhead::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -4px;
+  border: 5px solid transparent;
+  border-top: 7px solid var(--now);
+  border-bottom: 0;
+}
+
+.loop-range {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  background: var(--sel-soft);
+}
+
+.loop-end {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 14px;
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+.loop-end::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--sel);
+}
+
+.loop-end::after {
+  content: "";
+  position: absolute;
+  bottom: 0;
+  width: 8px;
+  height: 12px;
+  background: var(--sel);
+}
+
+/* Both ends sit inside the loop, so neither leaves the window. */
+.loop-end.start::before,
+.loop-end.start::after {
+  left: 0;
+}
+
+.loop-end.end {
+  margin-left: -14px;
+}
+
+.loop-end.end::before,
+.loop-end.end::after {
+  right: 0;
+}
+
+.loop-end.start::after {
+  border-radius: 0 3px 3px 0;
+}
+
+.loop-end.end::after {
+  border-radius: 3px 0 0 3px;
+}
+
+.loop-end:focus-visible {
+  outline-offset: -2px;
+}
+
+/* Transport bar */
+.transport-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-width: 0;
+  padding: 0 var(--space-4);
+  border-top: 1px solid var(--line);
+  background: var(--panel-2);
+}
+
+.clock {
+  flex: none;
+  font: 600 var(--text-xl) / 1 var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.clock span {
+  font: 400 var(--text) var(--mono);
+  color: var(--ink-2);
+}
+
+.transport-bar .status {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+  color: var(--ink-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transport-bar .problem {
+  color: var(--err);
+}
+
+.volume {
+  flex: none;
+  width: 150px;
+  color: var(--ink-2);
+}

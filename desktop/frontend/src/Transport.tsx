@@ -1,16 +1,17 @@
-// Interim transport: waveform, seek, loop, and volume. Functional only; the
-// designed interface replaces it.
-import { useEffect, useRef, useState } from "react";
+// The timeline strip and transport bar at the bottom of the window.
+import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import type { LoopRange, RenderPeaks, TransportView } from "./protocol";
-
-/** Matches the engine's minimum (Sonora.Service.Session.minLoopSeconds). */
-const MIN_LOOP_SECONDS = 0.05;
+import { carryForward, clock, MIN_LOOP_SECONDS, moveLoop } from "./playback";
+import { LoopIcon, PauseIcon, PlayIcon, StopIcon, VolumeIcon } from "./ui/icons";
+import { Slider } from "./ui/Slider";
 
 interface Props {
   transport: TransportView;
   peaks: RenderPeaks | null;
   duration: number;
   canPlay: boolean;
+  /** What the render is doing, in words. */
+  status: string;
   onPlay: () => void;
   onPause: () => void;
   onStop: () => void;
@@ -19,15 +20,11 @@ interface Props {
   onVolume: (volume: number) => void;
 }
 
-export const clock = (seconds: number) => {
-  const tenths = Math.round(seconds * 10);
-  const m = Math.floor(tenths / 600);
-  const s = ((tenths % 600) / 10).toFixed(1).padStart(4, "0");
-  return `${m}:${s}`;
-};
+const VOLUME = { min: 0, max: 1, step: 0.01 };
+const percent = (v: number) => `${Math.round(v * 100)}%`;
 
 /** The engine's position, carried forward between its updates while playing. */
-function useSmoothPosition(transport: TransportView, duration: number): number {
+function usePosition(transport: TransportView, duration: number): number {
   const [now, setNow] = useState(() => performance.now());
   const received = useRef({ transport, at: performance.now() });
   if (received.current.transport !== transport) received.current = { transport, at: performance.now() };
@@ -43,115 +40,229 @@ function useSmoothPosition(transport: TransportView, duration: number): number {
 
   if (!transport.playing) return transport.positionSeconds;
   // Never run further ahead than a few missed updates.
-  const ahead = Math.min(0.2, Math.max(0, (now - received.current.at) / 1000));
-  const end = transport.loop && transport.loopActive && transport.positionSeconds < transport.loop.end ? transport.loop.end : duration;
-  return Math.min(end, transport.positionSeconds + ahead);
+  const elapsed = Math.min(0.2, (now - received.current.at) / 1000);
+  return carryForward(transport.positionSeconds, elapsed, duration, transport.loopActive ? transport.loop : null);
 }
 
-function Waveform({ peaks, position, duration, loop }: { peaks: RenderPeaks | null; position: number; duration: number; loop: LoopRange | null }) {
+function Waveform({ peaks }: { peaks: RenderPeaks | null }) {
   const canvas = useRef<HTMLCanvasElement>(null);
 
   useEffect(() => {
     const el = canvas.current;
-    const g = el?.getContext("2d");
-    if (!el || !g) return;
-    const ratio = window.devicePixelRatio || 1;
-    const w = el.clientWidth;
-    const h = el.clientHeight;
-    el.width = Math.round(w * ratio);
-    el.height = Math.round(h * ratio);
-    g.scale(ratio, ratio);
-    const color = getComputedStyle(el).color;
-    if (loop && duration > 0) {
-      g.globalAlpha = 0.2;
-      g.fillStyle = color;
-      const x = (loop.start / duration) * w;
-      g.fillRect(x, 0, (Math.min(loop.end, duration) / duration) * w - x, h);
-      g.globalAlpha = 1;
-    }
-    g.fillStyle = color;
-    const data = peaks?.peaks ?? [];
-    data.forEach(([lo, hi], i) => {
-      const x = (i / data.length) * w;
-      const top = (1 - hi) * (h / 2);
-      g.fillRect(x, top, Math.max(1, w / data.length), Math.max(1, (hi - lo) * (h / 2)));
-    });
-  }, [peaks, duration, loop]);
+    if (!el) return;
+    const draw = () => {
+      const g = el.getContext("2d");
+      if (!g) return;
+      const ratio = window.devicePixelRatio || 1;
+      const w = el.clientWidth;
+      const h = el.clientHeight;
+      el.width = Math.round(w * ratio);
+      el.height = Math.round(h * ratio);
+      g.scale(ratio, ratio);
+      g.fillStyle = getComputedStyle(el).color;
+      const data = peaks?.peaks ?? [];
+      if (data.length === 0) return;
+      for (let x = 0; x < w; x++) {
+        const from = Math.floor((x / w) * data.length);
+        const to = Math.max(from + 1, Math.floor(((x + 1) / w) * data.length));
+        let lo = 1;
+        let hi = -1;
+        for (let i = from; i < to; i++) {
+          lo = Math.min(lo, data[i][0]);
+          hi = Math.max(hi, data[i][1]);
+        }
+        g.fillRect(x, (1 - hi) * (h / 2), 1, Math.max(1, (hi - lo) * (h / 2)));
+      }
+    };
+    draw();
+    const resize = new ResizeObserver(draw);
+    resize.observe(el);
+    const look = window.matchMedia("(prefers-color-scheme: dark)");
+    look.addEventListener("change", draw);
+    return () => {
+      resize.disconnect();
+      look.removeEventListener("change", draw);
+    };
+  }, [peaks]);
+
+  return <canvas ref={canvas} className="waveform" aria-hidden="true" />;
+}
+
+interface TimelineProps {
+  position: number;
+  duration: number;
+  peaks: RenderPeaks | null;
+  loop: LoopRange | null;
+  onSeek: (seconds: number) => void;
+  onLoop: (loop: LoopRange) => void;
+}
+
+function Timeline({ position, duration, peaks, loop, onSeek, onLoop }: TimelineProps) {
+  const strip = useRef<HTMLDivElement>(null);
+  // The loop while one of its ends is being dragged. Also kept in a ref, as
+  // the pointer can be released before the last move has been rendered.
+  const [draft, showDraft] = useState<LoopRange | null>(null);
+  const drafted = useRef<LoopRange | null>(null);
+  const setDraft = (next: LoopRange | null) => {
+    drafted.current = next;
+    showDraft(next);
+  };
+  const grabbed = useRef<"seek" | "start" | "end" | null>(null);
+  const shownLoop = draft ?? loop;
+  const enabled = duration > 0;
+  const at = (seconds: number) => `${(Math.min(Math.max(seconds, 0), duration) / (duration || 1)) * 100}%`;
+
+  const secondsAt = (e: PointerEvent) => {
+    const box = strip.current!.getBoundingClientRect();
+    return Math.min(1, Math.max(0, (e.clientX - box.left) / box.width)) * duration;
+  };
+
+  const down = (what: "seek" | "start" | "end") => (e: PointerEvent) => {
+    if (!enabled || e.button !== 0 || grabbed.current) return;
+    e.stopPropagation();
+    grabbed.current = what;
+    strip.current!.setPointerCapture(e.pointerId);
+    if (what === "seek") onSeek(secondsAt(e));
+    else setDraft(loop);
+  };
+  const move = (e: PointerEvent) => {
+    const what = grabbed.current;
+    if (!what) return;
+    if (what === "seek") onSeek(secondsAt(e));
+    else if (drafted.current) setDraft(moveLoop(drafted.current, what, secondsAt(e), duration));
+  };
+  const up = () => {
+    if (grabbed.current && grabbed.current !== "seek" && drafted.current) onLoop(drafted.current);
+    grabbed.current = null;
+    setDraft(null);
+  };
+
+  const keySeek = (e: KeyboardEvent) => {
+    const target = {
+      ArrowLeft: position - 1,
+      ArrowRight: position + 1,
+      PageDown: position - duration / 10,
+      PageUp: position + duration / 10,
+      Home: 0,
+      End: duration,
+    }[e.key];
+    if (target === undefined) return;
+    e.preventDefault();
+    onSeek(Math.min(duration, Math.max(0, target)));
+  };
+  const keyLoop = (which: "start" | "end") => (e: KeyboardEvent) => {
+    const step = { ArrowLeft: -0.05, ArrowRight: 0.05, PageDown: -1, PageUp: 1 }[e.key];
+    if (step === undefined || !loop) return;
+    e.preventDefault();
+    e.stopPropagation();
+    onLoop(moveLoop(loop, which, loop[which] + step, duration));
+  };
 
   return (
-    <div className="waveform">
-      <canvas ref={canvas} aria-hidden="true" />
-      {duration > 0 ? <div className="playhead" style={{ left: `${Math.min(100, (position / duration) * 100)}%` }} /> : null}
+    <div
+      ref={strip}
+      className="timeline"
+      role="slider"
+      tabIndex={enabled ? 0 : -1}
+      aria-label="Position"
+      aria-disabled={!enabled}
+      aria-valuemin={0}
+      aria-valuemax={Math.round(duration * 10) / 10}
+      aria-valuenow={Math.round(position * 10) / 10}
+      aria-valuetext={`${clock(position)} of ${clock(duration)}`}
+      onPointerDown={down("seek")}
+      onPointerMove={move}
+      onPointerUp={up}
+      onPointerCancel={up}
+      onLostPointerCapture={up}
+      onKeyDown={keySeek}
+    >
+      {shownLoop ? (
+        <div className="loop-range" style={{ left: at(shownLoop.start), right: `calc(100% - ${at(shownLoop.end)})` }} />
+      ) : null}
+      <Waveform peaks={peaks} />
+      {shownLoop
+        ? (["start", "end"] as const).map((which) => (
+            <div
+              key={which}
+              className={`loop-end ${which}`}
+              style={{ left: at(shownLoop[which]) }}
+              role="slider"
+              tabIndex={0}
+              aria-label={which === "start" ? "Loop start" : "Loop end"}
+              aria-valuemin={0}
+              aria-valuemax={Math.round(duration * 10) / 10}
+              aria-valuenow={Math.round(shownLoop[which] * 100) / 100}
+              aria-valuetext={clock(shownLoop[which])}
+              onPointerDown={down(which)}
+              onKeyDown={keyLoop(which)}
+            />
+          ))
+        : null}
+      {enabled ? <div className="playhead" style={{ left: at(position) }} /> : null}
     </div>
   );
 }
 
 export function Transport(props: Props) {
   const { transport, duration, canPlay } = props;
-  const position = useSmoothPosition(transport, duration);
-  const loop = transport.loop;
-  const [from, setFrom] = useState(0);
-  const loopEnd = Math.max(position, from + MIN_LOOP_SECONDS);
+  const position = usePosition(transport, duration);
 
   return (
-    <div className="transport">
-      <Waveform peaks={props.peaks} position={position} duration={duration} loop={transport.loopActive ? loop : null} />
-      <input
-        type="range"
-        aria-label="Position"
-        aria-valuetext={`${clock(position)} of ${clock(duration)}`}
-        min={0}
-        max={duration}
-        step={0.01}
-        value={Math.min(position, duration)}
-        disabled={!canPlay}
-        onChange={(e) => props.onSeek(Number(e.target.value))}
+    <>
+      <Timeline
+        position={position}
+        duration={duration}
+        peaks={props.peaks}
+        loop={transport.loopActive ? transport.loop : null}
+        onSeek={props.onSeek}
+        onLoop={props.onLoop}
       />
-      <div className="actions">
-        {transport.playing ? (
-          <button type="button" onClick={props.onPause}>
-            Pause
-          </button>
-        ) : (
-          <button type="button" onClick={props.onPlay} disabled={!canPlay}>
-            Play
-          </button>
-        )}
-        <button type="button" onClick={props.onStop} disabled={!canPlay}>
-          Stop
+      <footer className="transport-bar">
+        <button
+          type="button"
+          className="button primary"
+          aria-label={transport.playing ? "Pause" : "Play"}
+          disabled={!canPlay}
+          onClick={transport.playing ? props.onPause : props.onPlay}
+        >
+          {transport.playing ? <PauseIcon /> : <PlayIcon />}
         </button>
-        <span data-testid="clock">
-          {clock(position)} / {clock(duration)}
+        <button type="button" className="button square" aria-label="Stop" disabled={!canPlay} onClick={props.onStop}>
+          <StopIcon />
+        </button>
+        <button
+          type="button"
+          className="button square"
+          aria-label="Loop"
+          aria-pressed={transport.loopActive}
+          disabled={!canPlay || duration < MIN_LOOP_SECONDS}
+          onClick={() => props.onLoop(transport.loopActive ? null : { start: 0, end: duration })}
+        >
+          <LoopIcon />
+        </button>
+        <span className="clock" data-testid="clock">
+          {clock(position)} <span>/ {clock(duration)}</span>
         </span>
-        <button type="button" disabled={!canPlay} onClick={() => setFrom(position)}>
-          Loop from here
-        </button>
-        <button type="button" disabled={!canPlay} onClick={() => props.onLoop({ start: from, end: loopEnd })}>
-          Loop to here
-        </button>
-        {loop ? (
-          <button type="button" onClick={() => props.onLoop(null)}>
-            Clear loop {clock(loop.start)}–{clock(loop.end)}
-            {transport.loopActive ? "" : " (outside the song)"}
-          </button>
-        ) : null}
-        <label>
-          Volume{" "}
-          <input
-            type="range"
-            min={0}
-            max={1}
-            step={0.01}
+        <span className="status" role="status">
+          {transport.deviceLost ? (
+            <span className="problem">Audio device disconnected. Press Play to use the current one.</span>
+          ) : (
+            props.status
+          )}
+        </span>
+        <div className="volume">
+          <Slider
+            label="Volume"
+            icon={<VolumeIcon />}
             value={transport.volume}
-            onChange={(e) => props.onVolume(Number(e.target.value))}
+            range={VOLUME}
+            defaultValue={1}
+            format={percent}
+            onInput={props.onVolume}
           />
-        </label>
-      </div>
-      {transport.deviceLost ? (
-        <p className="error" role="alert">
-          The audio device was disconnected. Press Play to continue on the current output.
-        </p>
-      ) : null}
-    </div>
+        </div>
+      </footer>
+    </>
   );
 }
