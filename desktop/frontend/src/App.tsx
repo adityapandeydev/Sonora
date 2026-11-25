@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { GenerateDialog, VersionsDialog } from "./GenerateDialog";
 import { engineStatus, onEngineStatus, restartEngine, State, type Status } from "./engine";
 import { useProject } from "./useProject";
 import { scoreState, Workspace } from "./Workspace";
@@ -15,6 +16,7 @@ const describe: Record<string, string> = {
 export default function App() {
   const [status, setStatus] = useState<Status | null>(null);
   const [restarting, setRestarting] = useState(false);
+  const [dialog, setDialog] = useState<"generate" | "versions" | null>(null);
 
   useEffect(() => {
     const off = onEngineStatus(setStatus);
@@ -51,7 +53,30 @@ export default function App() {
         <span className={`state ${banner.tone}`} role="status">
           {banner.words}
         </span>
+        {open ? (
+          <div className="top-actions">
+            <button type="button" className="button on-shell" onClick={() => setDialog("versions")} disabled={project.versions.length === 0} title="Scores replaced by generating or restoring">
+              Versions{project.versions.length > 0 ? ` (${project.versions.length})` : ""}
+            </button>
+            <button type="button" className="button on-shell" onClick={() => setDialog("generate")}>
+              Generate
+            </button>
+          </div>
+        ) : null}
       </header>
+      {open ? (
+        <>
+          <GenerateDialog
+            open={dialog === "generate"}
+            roots={project.generator.roots}
+            scales={project.generator.scales}
+            versions={project.versions}
+            onClose={() => setDialog(null)}
+            onGenerate={session.generate}
+          />
+          <VersionsDialog open={dialog === "versions"} versions={project.versions} onClose={() => setDialog(null)} onRestore={session.restoreVersion} />
+        </>
+      ) : null}
       {open ? (
         <Workspace
           project={project}
@@ -69,6 +94,7 @@ export default function App() {
           onLoop={session.setLoop}
           onVolume={session.setVolume}
           onRetryRender={session.retryRender}
+          onCancelRender={session.cancelRender}
         />
       ) : (
         <main className="message">

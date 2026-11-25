@@ -76,6 +76,8 @@ interface Props {
   canPlay: boolean;
   /** What the render is doing, in words. */
   status: string;
+  /** Cancel or start a render, when that is possible. */
+  renderAction?: { label: string; run: () => void } | null;
   onPlay: () => void;
   onPause: () => void;
   onStop: () => void;
@@ -320,6 +322,11 @@ export function Transport(props: Props) {
             props.status
           )}
         </span>
+        {props.renderAction ? (
+          <button type="button" className="button small" onClick={props.renderAction.run}>
+            {props.renderAction.label}
+          </button>
+        ) : null}
         <div className="volume">
           <Slider
             label="Volume"

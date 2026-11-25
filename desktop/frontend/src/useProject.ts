@@ -3,7 +3,7 @@
 // this hook only keeps the latest view of it and the local editor text.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { EngineError, onEngineEvent, request } from "./engine";
-import type { LoopRange, ProjectView, RenderPeaks, RenderProgress, ScoreTiming, TransportView } from "./protocol";
+import type { GenSettings, LoopRange, ProjectView, RenderPeaks, RenderProgress, ScoreTiming, TransportView } from "./protocol";
 
 /** Idle time after typing before the engine validates the score. */
 export const VALIDATE_AFTER_MS = 250;
@@ -25,6 +25,8 @@ export function useProject(ready: boolean) {
   const [timing, setTiming] = useState<ScoreTiming | null>(null);
   const shownRevision = useRef(-1);
   const timer = useRef<number | undefined>(undefined);
+  /** Text typed but not yet sent to the engine. */
+  const pending = useRef<string | null>(null);
 
   const report = useCallback((e: unknown) => {
     if (!isCancel(e)) setError(describeError(e));
@@ -93,8 +95,10 @@ export function useProject(ready: boolean) {
     (next: string) => {
       setText(next);
       setError(null);
+      pending.current = next;
       window.clearTimeout(timer.current);
       timer.current = window.setTimeout(() => {
+        pending.current = null;
         request<ProjectView>("project.setScore", { text: next }).then(accept).catch(report);
       }, VALIDATE_AFTER_MS);
     },
@@ -162,6 +166,22 @@ export function useProject(ready: boolean) {
 
   useEffect(() => () => window.clearTimeout(timer.current), []);
 
+  // Replace the score in the engine. Typing not yet sent goes first, so the
+  // engine keeps it as the version being replaced. Errors go to the caller.
+  const replace = useCallback(
+    async (method: string, params: unknown) => {
+      setError(null);
+      window.clearTimeout(timer.current);
+      const unsent = pending.current;
+      pending.current = null;
+      if (unsent !== null) accept(await request<ProjectView>("project.setScore", { text: unsent }));
+      const v = await request<ProjectView>(method, params);
+      accept(v);
+      setText(v.scoreText);
+    },
+    [accept],
+  );
+
   return {
     project,
     text,
@@ -178,5 +198,8 @@ export function useProject(ready: boolean) {
     setLoop: (loop: LoopRange | null) => transportCommand("transport.setLoop", { loop }),
     setVolume: (volume: number) => dragCommand("transport.setVolume", { volume }),
     retryRender: () => request("render.start").then(refresh).catch(report),
+    cancelRender: () => request("render.cancel").then(refresh).catch(report),
+    generate: (settings: GenSettings) => replace("project.generate", { settings }),
+    restoreVersion: (id: number) => replace("project.restoreVersion", { id }),
   };
 }

@@ -124,6 +124,31 @@ export interface ProjectView {
   master: { gain: number };
   render: RenderView;
   transport: TransportView;
+  /** Kept scores, newest first. */
+  versions: ScoreVersion[];
+  /** What the generator accepts. */
+  generator: { roots: string[]; scales: string[] };
+}
+
+/** Settings for project.generate. */
+export interface GenSettings {
+  seed: number;
+  root: string;
+  scale: string;
+  bpm: number;
+  bars: number;
+}
+
+export interface ScoreVersion {
+  id: number;
+  label: string;
+  /** Project revision when the version was kept. */
+  revision: number;
+  /** Present for generated scores. */
+  settings: GenSettings | null;
+  /** The version's text is the current score text. */
+  current: boolean;
+  lines: number;
 }
 
 /** Waveform overview: `[min, max]` per equal span of the render. */

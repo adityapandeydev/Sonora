@@ -25,6 +25,7 @@ interface Props {
   onLoop: (loop: LoopRange | null) => void;
   onVolume: (volume: number) => void;
   onRetryRender: () => void;
+  onCancelRender: () => void;
 }
 
 function renderStatus(project: ProjectView, progress: RenderProgress | null): string {
@@ -192,6 +193,8 @@ export function Workspace(props: Props) {
 
   useEffect(() => {
     const keys = (e: KeyboardEvent) => {
+      // A dialog has the keyboard to itself.
+      if (document.querySelector("dialog[open]")) return;
       const ctrl = e.ctrlKey || e.metaKey;
       const playPause = () => (transport.playing ? props.onPause() : canPlay && props.onPlay());
       if (e.key === " " && ((ctrl && !e.shiftKey) || (!ctrl && !e.altKey && !typing(e.target)))) {
@@ -328,6 +331,13 @@ export function Workspace(props: Props) {
         lanes={lanes}
         canPlay={canPlay}
         status={renderStatus(project, props.progress)}
+        renderAction={
+          project.render.state === "rendering"
+            ? { label: "Cancel", run: props.onCancelRender }
+            : (project.render.state === "idle" || project.render.state === "outdated") && project.scoreIsCurrent && settled
+              ? { label: "Render", run: props.onRetryRender }
+              : null
+        }
         onPlay={props.onPlay}
         onPause={props.onPause}
         onStop={props.onStop}
