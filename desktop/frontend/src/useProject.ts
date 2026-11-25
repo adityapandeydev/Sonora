@@ -166,6 +166,15 @@ export function useProject(ready: boolean) {
 
   useEffect(() => () => window.clearTimeout(timer.current), []);
 
+  const command = useCallback(
+    (cmd: unknown) =>
+      request<ProjectView>("project.apply", { command: cmd }).then((v) => {
+        accept(v);
+        return v;
+      }),
+    [accept],
+  );
+
   // Replace the score in the engine. Typing not yet sent goes first, so the
   // engine keeps it as the version being replaced. Errors go to the caller.
   const replace = useCallback(
@@ -198,6 +207,7 @@ export function useProject(ready: boolean) {
     setLoop: (loop: LoopRange | null) => transportCommand("transport.setLoop", { loop }),
     setVolume: (volume: number) => dragCommand("transport.setVolume", { volume }),
     retryRender: () => request("render.start").then(refresh).catch(report),
+    command,
     cancelRender: () => request("render.cancel").then(refresh).catch(report),
     generate: (settings: GenSettings) => replace("project.generate", { settings }),
     restoreVersion: (id: number) => replace("project.restoreVersion", { id }),

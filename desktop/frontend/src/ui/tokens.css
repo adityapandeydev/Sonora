@@ -63,6 +63,11 @@
   --track-3: #2856a8;
   --track-4: #6b5a00;
   --track-5: #a1303f;
+
+  /* Audition keyboard: piano colours in both looks. */
+  --key-white: #fbfcff;
+  --key-black: #1d2a4d;
+  --key-label: #4f5b78;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -101,5 +106,9 @@
     --track-3: #9fbaf2;
     --track-4: #d6c56a;
     --track-5: #ff9fa8;
+
+    --key-white: #e9dcd6;
+    --key-black: #160b10;
+    --key-label: #5a4a48;
   }
 }

@@ -95,6 +95,7 @@ export default function App() {
           onVolume={session.setVolume}
           onRetryRender={session.retryRender}
           onCancelRender={session.cancelRender}
+          onCommand={session.command}
         />
       ) : (
         <main className="message">

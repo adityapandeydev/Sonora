@@ -1,7 +1,7 @@
 // The sound-led workspace: tracks, the selected track's sound, its part of
 // the score, the timeline, and the transport.
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { Diagnostic, LoopRange, ProjectView, RenderPeaks, RenderProgress, ScoreTiming, TransportView } from "./protocol";
+import type { Diagnostic, LoopRange, Patch, ProjectView, RenderPeaks, RenderProgress, ScoreTiming, TransportView } from "./protocol";
 import { ScoreEditor, type EditorHandle } from "./ScoreEditor";
 import { barAround, barLabels, nextProblem, replaceSlice, sliceOf, sliceText, type Slice } from "./score";
 import { SoundView } from "./SoundView";
@@ -26,6 +26,8 @@ interface Props {
   onVolume: (volume: number) => void;
   onRetryRender: () => void;
   onCancelRender: () => void;
+  /** Send a project command; resolves once the engine has applied it. */
+  onCommand: (command: unknown) => Promise<unknown>;
 }
 
 function renderStatus(project: ProjectView, progress: RenderProgress | null): string {
@@ -182,6 +184,9 @@ export function Workspace(props: Props) {
   };
 
   const canPlay = project.render.latest !== null;
+  const onCommand = props.onCommand;
+  const applySound = useCallback((t: { id: string }, patch: Patch) => onCommand({ type: "setTrackPatch", track: t.id, patch }), [onCommand]);
+  const resetSound = useCallback((t: { id: string }) => onCommand({ type: "resetTrackPatch", track: t.id }), [onCommand]);
   const loopBar = () => {
     if (!canPlay) return;
     const line = editor.current?.caretLine() ?? caretLine.current;
@@ -283,7 +288,15 @@ export function Workspace(props: Props) {
       ) : null}
     </section>
   );
-  const sound = <SoundView track={selected} colour={trackColour(selectedIndex)} />;
+  const sound = (
+    <SoundView
+      track={selected}
+      colour={trackColour(selectedIndex)}
+      songStatus={project.render.state === "rendering" ? "rendering" : project.render.state === "ready" ? "rendered" : "unrendered"}
+      onApply={applySound}
+      onReset={resetSound}
+    />
+  );
 
   const maxScore = Math.max(300, width - sizes.tracks - 360);
   const columns = compact ? `${Math.min(sizes.tracks, 200)}px minmax(0, 1fr)` : `${sizes.tracks}px 0 minmax(320px, 1fr) 0 ${Math.min(sizes.score, maxScore)}px`;
