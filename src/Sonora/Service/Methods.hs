@@ -16,6 +16,7 @@ import Data.Text (Text)
 import Sonora.Service.Protocol
 import Sonora.Service.Server (Handler, ServerContext (..))
 import Sonora.Service.Session
+import Sonora.Synth.Patch (Patch)
 
 -- | Product methods, served from one session.
 --
@@ -38,10 +39,20 @@ import Sonora.Service.Session
 --   the parameters at fault.
 -- * @project.restoreVersion@ @{id}@ → project view; brings back a kept score,
 --   keeping the text it replaces.
+-- * @audition.start@ @{patch, pitch, velocity?}@ → @{auditionId}@; plays one
+--   note of a sound over the song, held until released (at most a few
+--   seconds). Replaces a note already sounding. Errors: @invalid_value@
+--   (with @params@), @audio_unavailable@.
+-- * @audition.update@ @{auditionId, patch}@, @audition.release@ @{auditionId}@
+--   → @{auditionId, active}@; change the sounding note's sound, or let it
+--   release. @active@ is false when the note was replaced or stopped.
+-- * @audition.stop@ → silences the audition.
 --
 -- Events: @render.started@, @render.progress@, @render.finished@,
 -- @render.failed@, @render.cancelled@ (all carry @jobId@ and @revision@),
--- and @transport@ (on changes, and periodically while playing).
+-- @transport@ (on changes, and periodically while playing), and @audition@
+-- (@{auditionId, revision, state: "playing" | "failed"}@ as each render of
+-- the note reaches the speaker or fails).
 applicationMethods :: Session -> Map.Map Text Handler
 applicationMethods s = Map.fromList
     [ ("project.get", \_ _ -> Right <$> projectView s)
@@ -64,7 +75,16 @@ applicationMethods s = Map.fromList
     , ("project.timing", \_ _ -> Right <$> scoreTiming s)
     , ("project.generate", \ctx params -> withParams (.: "settings") params (generate s (contextEmit ctx)))
     , ("project.restoreVersion", \ctx params -> withParams (.: "id") params (restoreVersion s (contextEmit ctx)))
+    , ("audition.start", \ctx params -> withParams startParams params
+        (\(p, pitch, vel) -> startAudition s (contextEmit ctx) p pitch vel))
+    , ("audition.update", \ctx params -> withParams (\o -> (,) <$> o .: "auditionId" <*> o .: "patch") params
+        (uncurry (updateAudition s (contextEmit ctx))))
+    , ("audition.release", \ctx params -> withParams (.: "auditionId") params (releaseAudition s (contextEmit ctx)))
+    , ("audition.stop", \ctx _ -> Right <$> stopAudition s (contextEmit ctx))
     ]
+
+startParams :: Object -> Parser (Patch, Int, Double)
+startParams o = (,,) <$> o .: "patch" <*> o .: "pitch" <*> o .:? "velocity" .!= 0.8
 
 withParams :: (Object -> Parser a) -> Value -> (a -> IO (Either ServiceError Value)) -> IO (Either ServiceError Value)
 withParams parser params act = either (return . Left) act (parseParams (withObject "params" parser) params)
@@ -84,7 +104,8 @@ serialMethods = Set.fromList
     [ "project.get", "project.setScore", "project.apply", "render.start", "render.cancel"
     , "transport.play", "transport.pause", "transport.stop", "transport.state"
     , "transport.seek", "transport.setLoop", "transport.setVolume"
-    , "project.generate", "project.restoreVersion" ]
+    , "project.generate", "project.restoreVersion"
+    , "audition.start", "audition.update", "audition.release", "audition.stop" ]
 
 -- | Methods for exercising the protocol from tests and host integration
 -- checks. Only served when the service is started with

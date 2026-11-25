@@ -49,6 +49,10 @@ module Sonora.Service.Session
     , scoreTiming
     , generate
     , restoreVersion
+    , startAudition
+    , updateAudition
+    , releaseAudition
+    , stopAudition
     , maxVersions
     , maxPeakBuckets
     , minLoopSeconds
@@ -65,6 +69,7 @@ import qualified Data.Vector.Storable as V
 import Data.Word (Word64)
 import GHC.Clock (getMonotonicTime)
 
+import Sonora.Audio.Audition
 import Sonora.Audio.Backend
 import Sonora.Audio.Device (openDeviceBackend)
 import Sonora.DSL.Print (printSong)
@@ -78,7 +83,7 @@ import Sonora.Project.Update
 import Sonora.Service.Protocol
 import Sonora.Signal.Core (Frame)
 import Sonora.Signal.Waveform (waveformPeaks)
-import Sonora.Synth.Patch (ParamError (..))
+import Sonora.Synth.Patch (ParamError (..), Patch, validatePatch)
 
 type Emit = Event -> IO ()
 
@@ -90,6 +95,8 @@ data SessionConfig = SessionConfig
     , sessionInitialScore :: !Text
       -- | Interval between @transport@ events while playing, in microseconds.
     , sessionTelemetryMicros :: !Int
+      -- | Renders one auditioned note.
+    , sessionAuditionRenderer :: Int -> Patch -> AuditionNote -> IO (V.Vector Frame)
     }
 
 defaultSessionConfig :: SessionConfig
@@ -99,6 +106,7 @@ defaultSessionConfig = SessionConfig
     , sessionOpenAudio       = openDeviceBackend
     , sessionInitialScore    = starterScore
     , sessionTelemetryMicros = 40000
+    , sessionAuditionRenderer = \sr p n -> evaluate (renderAudition sr p n)
     }
 
 -- | The score a new session starts with.
@@ -167,6 +175,20 @@ data St = St
     , stValidSince :: !Revision            -- ^ Revision at which the valid score last changed.
     , stVersions :: ![ScoreVersion]        -- ^ Newest first, at most 'maxVersions'.
     , stNextVersion :: !Int
+    , stAudition :: !(Maybe Audition)      -- ^ The note being auditioned.
+    , stNextAudition :: !Int
+    }
+
+-- | One auditioned note. Each change (a new patch, the release) renders it
+-- again as a new revision; only the latest revision reaches the speaker.
+data Audition = Audition
+    { auId       :: !Int
+    , auPatch    :: !Patch
+    , auNote     :: !AuditionNote
+    , auRevision :: !Int               -- ^ Latest render requested.
+    , auShown    :: !Int               -- ^ Revision on the audition voice; 0 before the first.
+    , auReleased :: !Bool
+    , auWorker   :: !(Maybe ThreadId)
     }
 
 -- | A score kept so that generating or restoring never loses the text it replaces.
@@ -203,6 +225,8 @@ newSession cfg = Session cfg <$> newMVar St
     , stValidSince = Revision 0
     , stVersions = []
     , stNextVersion = 1
+    , stAudition = Nothing
+    , stNextAudition = 1
     }
 
 -- | Stop rendering and playback and release the audio device.
@@ -210,8 +234,9 @@ closeSession :: Session -> IO ()
 closeSession s = modifyMVar_ (sState s) $ \st -> do
     forM_ (stRunning st) (killThread . jobThread)
     forM_ (stWatcher st) killThread
+    forM_ (stAudition st >>= auWorker) killThread
     forM_ (stAudio st) backendClose
-    return st { stRunning = Nothing, stWatcher = Nothing, stAudio = Nothing, stLoaded = Nothing }
+    return st { stRunning = Nothing, stWatcher = Nothing, stAudio = Nothing, stLoaded = Nothing, stAudition = Nothing }
 
 -------------------------------------------------------------------------------
 -- Project
@@ -372,6 +397,122 @@ replaceScore s emit txt keep = modifyMVar (sState s) $ \st ->
                 kept = st' { stVersions = stVersions versions, stNextVersion = stNextVersion versions }
             v <- projectViewLocked kept
             return (kept, Right v)
+
+-------------------------------------------------------------------------------
+-- Audition
+
+auditionProblems :: Patch -> Int -> Double -> [ParamError]
+auditionProblems patch pitch velocity = concat
+    [ [ ParamError ("patch." <> paramPath e) (paramMessage e) | e <- validatePatch patch ]
+    , [ ParamError "pitch" ("must be between " <> T.pack (show minPitch) <> " and " <> T.pack (show maxPitch))
+      | pitch < minPitch || pitch > maxPitch ]
+    , [ ParamError "velocity" "must be between 0 and 1" | not (finite velocity) || velocity < 0 || velocity > 1 ]
+    ]
+
+invalidParams :: [ParamError] -> ServiceError
+invalidParams ps = ServiceError InvalidValue "Some values are not valid" (Just (object ["params" .= ps]))
+
+-- | Start a note with a sound, held until released (at most 'holdSeconds').
+-- Replaces any note already sounding.
+startAudition :: Session -> Emit -> Patch -> Int -> Double -> IO (Either ServiceError Value)
+startAudition s emit patch pitch velocity = case auditionProblems patch pitch velocity of
+    problems@(_ : _) -> return (Left (invalidParams problems))
+    [] -> modifyMVar (sState s) $ \st0 -> do
+        st <- noticeLoss st0
+        opened <- ensureAudio s st
+        case opened of
+            Left err -> return (st, Left (serviceError AudioUnavailable (T.pack (audioErrorMessage err))))
+            Right (_, st1) -> do
+                forM_ (stAudition st1 >>= auWorker) killThread
+                let aid = stNextAudition st1
+                    au = Audition aid patch (AuditionNote pitch velocity holdSeconds) 0 0 False Nothing
+                au' <- renderAuditionLocked s emit au
+                return ( st1 { stAudition = Just au', stNextAudition = aid + 1 }
+                       , Right (object ["auditionId" .= aid]) )
+
+-- | Hear a changed sound on the note that is sounding.
+updateAudition :: Session -> Emit -> Int -> Patch -> IO (Either ServiceError Value)
+updateAudition s emit aid patch = case [ ParamError ("patch." <> paramPath e) (paramMessage e) | e <- validatePatch patch ] of
+    problems@(_ : _) -> return (Left (invalidParams problems))
+    [] -> withAudition s aid $ \_ au -> do
+        forM_ (auWorker au) killThread
+        renderAuditionLocked s emit au { auPatch = patch }
+
+-- | Let go of the key: the note releases from where it is now.
+releaseAudition :: Session -> Emit -> Int -> IO (Either ServiceError Value)
+releaseAudition s emit aid = withAudition s aid $ \st au ->
+    if auReleased au then return au else do
+        playhead <- case stAudio st of
+            Just b | auShown au > 0 -> do
+                status <- backendStatus b AuditionVoice
+                return (Just (fromIntegral (statusPosition status) / fromIntegral (backendSampleRate b)))
+            _ -> return Nothing
+        -- Release a little ahead of the play head so the new render arrives
+        -- before its release begins; a note not yet heard becomes a short tap.
+        let gate = maybe tapSeconds (+ releaseLead) playhead
+        if gate >= noteGate (auNote au)
+            then return au { auReleased = True }
+            else do
+                forM_ (auWorker au) killThread
+                renderAuditionLocked s emit au { auReleased = True, auNote = (auNote au) { noteGate = gate } }
+
+-- | Silence the audition and forget it.
+stopAudition :: Session -> Emit -> IO Value
+stopAudition s _ = modifyMVar (sState s) $ \st -> do
+    forM_ (stAudition st >>= auWorker) killThread
+    forM_ (stAudio st) (\b -> backendSetPlaying b AuditionVoice False)
+    return (st { stAudition = Nothing }, object ["stopped" .= True])
+
+tapSeconds, releaseLead :: Double
+tapSeconds = 0.12
+releaseLead = 0.08
+
+-- | Apply a change to the current audition; answers whether it is still the
+-- current one.
+-- | Apply a change to the current audition under the lock, so a render it
+-- starts cannot finish before the change is recorded. Answers whether the
+-- audition is still the current one.
+withAudition :: Session -> Int -> (St -> Audition -> IO Audition) -> IO (Either ServiceError Value)
+withAudition s aid f = modifyMVar (sState s) $ \st -> case stAudition st of
+    Just au | auId au == aid -> do
+        au' <- f st au
+        return (st { stAudition = Just au' }, reply True)
+    _ -> return (st, reply False)
+  where
+    reply active = Right (object ["auditionId" .= aid, "active" .= active])
+
+-- | Render the next revision of a note in the background. The result is
+-- played only if it is still the latest revision of the current audition.
+renderAuditionLocked :: Session -> Emit -> Audition -> IO Audition
+renderAuditionLocked s emit au = do
+    let rev = auRevision au + 1
+        sr = sessionSampleRate (sConfig s)
+        aid = auId au
+    tid <- forkIO $ do
+        result <- try (sessionAuditionRenderer (sConfig s) sr (auPatch au) (auNote au))
+        case result of
+            Left (e :: SomeException) | Just (_ :: SomeAsyncException) <- fromException e -> throwIO e
+            _ -> modifyMVar_ (sState s) $ \st -> case stAudition st of
+                Just now | auId now == aid && auRevision now == rev -> case result of
+                    Right frames -> do
+                        case stAudio st of
+                            Just b
+                                | auShown now == 0 -> do
+                                    backendLoad b AuditionVoice frames
+                                    backendSetPlaying b AuditionVoice True
+                                | otherwise -> backendReplace b AuditionVoice frames
+                            Nothing -> return ()
+                        emit $ Event "audition" $ object
+                            [ "auditionId" .= aid, "revision" .= rev, "state" .= ("playing" :: Text)
+                            , "seconds" .= (fromIntegral (V.length frames) / fromIntegral sr :: Double) ]
+                        return st { stAudition = Just now { auShown = rev, auWorker = Nothing } }
+                    Left e -> do
+                        emit $ Event "audition" $ object
+                            [ "auditionId" .= aid, "revision" .= rev, "state" .= ("failed" :: Text)
+                            , "message" .= T.pack (displayException e) ]
+                        return st { stAudition = Just now { auWorker = Nothing } }
+                _ -> return st
+    return au { auRevision = rev, auWorker = Just tid }
 
 -------------------------------------------------------------------------------
 -- Rendering

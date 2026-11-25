@@ -75,6 +75,7 @@ library
         Sonora.Project.Layout
         Sonora.Audio.Backend
         Sonora.Audio.Mixer
+        Sonora.Audio.Audition
         Sonora.Audio.Device
         Sonora.Audio.Fake
         Sonora.Service.Protocol
@@ -153,6 +154,7 @@ test-suite sonora-test
         SessionSpec
         LayoutSpec
         GenerateSpec
+        AuditionSpec
     build-tool-depends:
         sonora:sonora-service
     build-depends:

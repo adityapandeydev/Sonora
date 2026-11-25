@@ -12,6 +12,7 @@ import ProjectSpec (projectTests)
 import SessionSpec (sessionTests)
 import LayoutSpec (layoutTests)
 import GenerateSpec (generateTests)
+import AuditionSpec (auditionTests)
 
 main :: IO ()
 main = do
@@ -37,8 +38,9 @@ main = do
     putStrLn ""
     p9 <- layoutTests
     p10 <- generateTests
+    p11 <- auditionTests
     putStrLn "========================================================"
-    if p1 && p2 && p3 && p4 && p5 && p6 && p7 && p8 && p9 && p10
+    if p1 && p2 && p3 && p4 && p5 && p6 && p7 && p8 && p9 && p10 && p11
         then do
             putStrLn "  ALL TEST SUITES PASSED SUCCESSFULLY! (100%)"
             putStrLn "========================================================"

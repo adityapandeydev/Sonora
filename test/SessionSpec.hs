@@ -30,6 +30,9 @@ import Sonora.Service.Methods (applicationMethods, serialMethods)
 import Sonora.Service.Protocol
 import Sonora.Service.Session
 import Sonora.Generate.Score (GenSettings (..))
+import Sonora.Audio.Audition (AuditionNote (..), holdSeconds)
+import Sonora.Synth.Patch (Patch (..), defaultPatch, lookupPresetPatch)
+import Sonora.Synth.Voice (VoiceConfig (..))
 import Sonora.Signal.Core
 
 -------------------------------------------------------------------------------
@@ -41,16 +44,33 @@ data Harness = Harness
     , hEvents  :: IORef [Event]          -- newest first
     , hFake    :: FakeAudio
     , hOpens   :: IORef Int
+    , hNotes   :: IORef [(Patch, AuditionNote)]  -- auditions rendered, newest first
     }
 
 data Fakes = Fakes
     { renderDelayMs :: Int
     , renderFails   :: Bool
     , audioFails    :: Bool
+    , auditionDelayMs :: Int
     }
 
 fakes :: Fakes
-fakes = Fakes 0 False False
+fakes = Fakes 0 False False 0
+
+-- | Audition buffers whose length identifies the request: the cutoff in
+-- frames plus the gate in milliseconds.
+fakeAudition :: Fakes -> IORef [(Patch, AuditionNote)] -> Int -> Patch -> AuditionNote -> IO (V.Vector Frame)
+fakeAudition f notes _ p n = do
+    atomicModifyIORef' notes (\ns -> ((p, n) : ns, ()))
+    when (auditionDelayMs f > 0) $ threadDelay (auditionDelayMs f * 1000)
+    return (V.replicate (auditionLength p n) (Frame 0.1 0.1))
+
+auditionLength :: Patch -> AuditionNote -> Int
+auditionLength p n = round (voiceFilterCutoff (patchVoice p)) + round (noteGate n * 1000)
+
+withCutoff :: Double -> Patch
+withCutoff c = (lookupPresetPatchOr "lead") { patchVoice = (patchVoice (lookupPresetPatchOr "lead")) { voiceFilterCutoff = c } }
+  where lookupPresetPatchOr name = maybe defaultPatch id (lookupPresetPatch name)
 
 -- | Frames whose value identifies the revision they were rendered from.
 fakeRenderer :: Fakes -> Int -> (Int -> Int -> IO ()) -> CompiledProject -> IO (V.Vector Frame)
@@ -67,6 +87,7 @@ withHarness :: Fakes -> (Harness -> IO Bool) -> IO Bool
 withHarness f act = do
     eventLog <- newIORef []
     opens <- newIORef (0 :: Int)
+    notes <- newIORef []
     fake <- newFakeAudio 1000
     let cfg = defaultSessionConfig
             { sessionSampleRate      = 1000
@@ -76,10 +97,11 @@ withHarness f act = do
                 return $ if audioFails f then Left (AudioError 1 "no output device") else Right (fakeBackend fake)
             , sessionInitialScore    = scoreA
             , sessionTelemetryMicros = 20000
+            , sessionAuditionRenderer = fakeAudition f notes
             }
     s <- newSession cfg
     let emit e = atomicModifyIORef' eventLog (\es -> (e : es, ()))
-    act (Harness s emit eventLog fake opens) `finally` closeSession s
+    act (Harness s emit eventLog fake opens notes) `finally` closeSession s
 
 scoreA, scoreB, scoreC, invalidScore :: Text
 scoreA = "track lead (lead):\n    C4 quarter\n"
@@ -110,6 +132,9 @@ named n = map eventData . filter ((== n) . eventName)
 
 jobIds :: Text -> [Event] -> [Double]
 jobIds n = mapMaybe (num ["jobId"]) . named n
+
+lengthOf :: Value -> Maybe Double
+lengthOf v = fmap (* 1000) (num ["seconds"] v)
 
 -- | Wait until the event log satisfies a condition (at most 3 s).
 waitUntil :: Harness -> ([Event] -> Bool) -> IO Bool
@@ -340,7 +365,7 @@ scenarios =
                 , sessionTelemetryMicros = 10000 }
         s <- newSession cfg
         let emit e = atomicModifyIORef' eventLog (\es -> (e : es, ()))
-            h = Harness s emit eventLog (error "no shared fake") opens0
+            h = Harness s emit eventLog (error "no shared fake") opens0 (error "no notes")
             opens0 = error "unused"
         (do _ <- startRender s emit
             _ <- waitUntil h (finishedCount 1)
@@ -439,6 +464,82 @@ scenarios =
         v <- projectView s
         let ids = maybe [] (\x -> case x of { Array a -> mapMaybe (num ["id"]) (foldr (:) [] a); _ -> [] }) (path ["versions"] v)
         return (length ids == maxVersions && ids == reverse [12 .. 41]))
+
+    , ("An auditioned note plays over the song without touching it", withHarness fakes $ \h -> do
+        let s = hSession h
+        _ <- startRender s (hEmit h)
+        _ <- waitUntil h (finishedCount 1)
+        _ <- play s (hEmit h)
+        fakeAdvance (hFake h) 100
+        before <- backendStatus (fakeBackend (hFake h)) SongVoice
+        r <- startAudition s (hEmit h) (withCutoff 500) 60 0.8
+        ok <- waitUntil h (not . null . named "audition")
+        a <- backendStatus (fakeBackend (hFake h)) AuditionVoice
+        after <- backendStatus (fakeBackend (hFake h)) SongVoice
+        return (either (const False) (\v -> num ["auditionId"] v == Just 1) r && ok
+                && statusPlaying a && statusLength a == fromIntegral (500 + round (holdSeconds * 1000) :: Int)
+                && statusPlaying after && statusPosition after == statusPosition before
+                && statusLength after == statusLength before))
+
+    , ("Fast changes to a sounding note end on the latest; none arrive stale", withHarness fakes { auditionDelayMs = 30 } $ \h -> do
+        let s = hSession h
+        Right v <- startAudition s (hEmit h) (withCutoff 100) 60 0.8
+        let aid = round (fromJust (num ["auditionId"] v))
+        rs <- mapM (\c -> updateAudition s (hEmit h) aid (withCutoff c) <* threadDelay 5000) [200, 300 .. 1000]
+        ok <- waitUntil h (\es -> any ((== Just (1000 + holdSeconds * 1000)) . lengthOf) (named "audition" es))
+        threadDelay 100000
+        es <- events h
+        a <- backendStatus (fakeBackend (hFake h)) AuditionVoice
+        let played = mapMaybe (num ["revision"]) (named "audition" es)
+        return (ok && all (either (const False) (\x -> path ["active"] x == Just (Bool True))) rs
+                && statusLength a == fromIntegral (1000 + round (holdSeconds * 1000) :: Int)
+                && played == [ r | r <- played, r == maximum played ] -- only the last revision played
+                ))
+
+    , ("Releasing re-renders the note with the key's real length", withHarness fakes $ \h -> do
+        let s = hSession h
+        Right v <- startAudition s (hEmit h) (withCutoff 100) 60 0.8
+        let aid = round (fromJust (num ["auditionId"] v))
+        _ <- waitUntil h (not . null . named "audition")
+        fakeAdvance (hFake h) 400   -- 0.4 s of the note has played
+        r <- releaseAudition s (hEmit h) aid
+        _ <- waitUntil h ((>= 2) . length . named "audition")
+        again <- releaseAudition s (hEmit h) aid
+        gates <- map (noteGate . snd) <$> readIORef (hNotes h)
+        a <- backendStatus (fakeBackend (hFake h)) AuditionVoice
+        return (either (const False) (\x -> path ["active"] x == Just (Bool True)) r
+                && map (\g -> round (g * 1000) :: Int) gates == [480, round (holdSeconds * 1000)]  -- play head plus the lead
+                && statusLength a == 100 + 480 && statusPlaying a
+                && either (const False) (const True) again
+                && length gates == 2))                     -- a second release does nothing
+
+    , ("A new note replaces the old one; stop silences it", withHarness fakes { auditionDelayMs = 40 } $ \h -> do
+        let s = hSession h
+        Right v1 <- startAudition s (hEmit h) (withCutoff 100) 60 0.8
+        Right _ <- startAudition s (hEmit h) (withCutoff 200) 64 0.8
+        _ <- waitUntil h (not . null . named "audition")
+        threadDelay 80000
+        es <- events h
+        old <- updateAudition s (hEmit h) (round (fromJust (num ["auditionId"] v1))) (withCutoff 900)
+        a <- backendStatus (fakeBackend (hFake h)) AuditionVoice
+        _ <- stopAudition s (hEmit h)
+        stopped <- backendStatus (fakeBackend (hFake h)) AuditionVoice
+        return (mapMaybe (num ["auditionId"]) (named "audition" es) == [2]
+                && either (const False) (\x -> path ["active"] x == Just (Bool False)) old
+                && statusLength a == fromIntegral (200 + round (holdSeconds * 1000) :: Int)
+                && not (statusPlaying stopped)))
+
+    , ("Invalid sounds and pitches name the field at fault", withHarness fakes $ \h -> do
+        let s = hSession h
+        r1 <- startAudition s (hEmit h) (withCutoff 5) 60 0.8
+        r2 <- startAudition s (hEmit h) (withCutoff 500) 200 1.5
+        let fields r = case r of
+                Left (ServiceError InvalidValue _ (Just d)) -> case path ["params"] d of
+                    Just (Array a) -> mapMaybe (str ["path"]) (foldr (:) [] a)
+                    _ -> []
+                _ -> []
+        notes <- readIORef (hNotes h)
+        return (fields r1 == ["patch.filter.cutoff"] && fields r2 == ["pitch", "velocity"] && null notes))
 
     , ("Every state-changing method is serial", withHarness fakes $ \h ->
         return (Map.keysSet (applicationMethods (hSession h)) == Set.insert "project.timing" (Set.insert "render.peaks" serialMethods)))
