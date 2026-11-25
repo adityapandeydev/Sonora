@@ -47,6 +47,9 @@ module Sonora.Service.Session
     , transportView
     , renderPeaks
     , scoreTiming
+    , generate
+    , restoreVersion
+    , maxVersions
     , maxPeakBuckets
     , minLoopSeconds
     ) where
@@ -64,6 +67,8 @@ import GHC.Clock (getMonotonicTime)
 
 import Sonora.Audio.Backend
 import Sonora.Audio.Device (openDeviceBackend)
+import Sonora.DSL.Print (printSong)
+import Sonora.Generate.Score
 import Sonora.Project.Compile
 import Sonora.Project.Layout (outline, songInfo, timing)
 import Sonora.Project.Render (renderCompiled)
@@ -73,6 +78,7 @@ import Sonora.Project.Update
 import Sonora.Service.Protocol
 import Sonora.Signal.Core (Frame)
 import Sonora.Signal.Waveform (waveformPeaks)
+import Sonora.Synth.Patch (ParamError (..))
 
 type Emit = Event -> IO ()
 
@@ -159,7 +165,21 @@ data St = St
     , stVolume   :: !Double
     , stLost     :: !Bool                  -- ^ The device went away; cleared by reopening it.
     , stValidSince :: !Revision            -- ^ Revision at which the valid score last changed.
+    , stVersions :: ![ScoreVersion]        -- ^ Newest first, at most 'maxVersions'.
+    , stNextVersion :: !Int
     }
+
+-- | A score kept so that generating or restoring never loses the text it replaces.
+data ScoreVersion = ScoreVersion
+    { versionId       :: !Int
+    , versionLabel    :: !Text
+    , versionText     :: !Text
+    , versionRevision :: !Revision           -- ^ Project revision when it was kept.
+    , versionSettings :: !(Maybe GenSettings) -- ^ Present for generated scores.
+    }
+
+maxVersions :: Int
+maxVersions = 30
 
 data Session = Session
     { sConfig :: !SessionConfig
@@ -181,6 +201,8 @@ newSession cfg = Session cfg <$> newMVar St
     , stVolume   = 1
     , stLost     = False
     , stValidSince = Revision 0
+    , stVersions = []
+    , stNextVersion = 1
     }
 
 -- | Stop rendering and playback and release the audio device.
@@ -221,6 +243,8 @@ projectViewLocked st = do
         , "outline"        .= outline (projectScoreText p)
         , "timingVersion"  .= stValidSince st
         , "master"         .= projectMaster p
+        , "versions"       .= map (versionView (projectScoreText p)) (stVersions st)
+        , "generator"      .= object ["roots" .= rootNames, "scales" .= scaleNames]
         , "render"         .= renderView st
         , "transport"      .= transport
         ]
@@ -268,17 +292,86 @@ setScore s emit txt = either (error "SetScoreText cannot fail") id <$> applyProj
 
 applyProjectCommand :: Session -> Emit -> Command -> IO (Either ServiceError Value)
 applyProjectCommand s emit cmd = modifyMVar (sState s) $ \st ->
-    case applyCommand cmd (stProject st) of
-        Left (CommandError code msg params) ->
-            let ecode = if code == "unknown_track" then UnknownTrack else InvalidValue
-                detail = if null params then Nothing else Just (object ["params" .= params])
-            in return (st, Left (ServiceError ecode msg detail))
-        Right p -> do
-            let changed = fmap validText (projectValidScore p) /= fmap validText (projectValidScore (stProject st))
-                since = if changed then projectRevision p else stValidSince st
-            st' <- startRenderLocked s emit False st { stProject = p, stValidSince = since }
+    applyLocked s emit cmd st >>= \r -> case r of
+        Left e -> return (st, Left e)
+        Right st' -> do
             v <- projectViewLocked st'
             return (st', Right v)
+
+-- | Apply a command and start a render when the playable song changed.
+applyLocked :: Session -> Emit -> Command -> St -> IO (Either ServiceError St)
+applyLocked s emit cmd st = case applyCommand cmd (stProject st) of
+    Left (CommandError code msg params) ->
+        let ecode = if code == "unknown_track" then UnknownTrack else InvalidValue
+            detail = if null params then Nothing else Just (object ["params" .= params])
+        in return (Left (ServiceError ecode msg detail))
+    Right p -> do
+        let changed = fmap validText (projectValidScore p) /= fmap validText (projectValidScore (stProject st))
+            since = if changed then projectRevision p else stValidSince st
+        Right <$> startRenderLocked s emit False st { stProject = p, stValidSince = since }
+
+versionView :: Text -> ScoreVersion -> Value
+versionView current v = object
+    [ "id"       .= versionId v
+    , "label"    .= versionLabel v
+    , "revision" .= versionRevision v
+    , "settings" .= versionSettings v
+    , "current"  .= (versionText v == current)
+    , "lines"    .= length (T.lines (versionText v))
+    ]
+
+-- | Keep the text being replaced, unless it is blank or already the newest version.
+keepCurrent :: Text -> St -> St
+keepCurrent label st =
+    let p = stProject st
+        txt = projectScoreText p
+        known = case stVersions st of
+            (v : _) -> versionText v == txt
+            [] -> False
+    in if T.null (T.strip txt) || known then st else pushVersion (ScoreVersion 0 label txt (projectRevision p) Nothing) st
+
+pushVersion :: ScoreVersion -> St -> St
+pushVersion v st = st
+    { stVersions = take maxVersions (v { versionId = stNextVersion st } : stVersions st)
+    , stNextVersion = stNextVersion st + 1
+    }
+
+-- | Replace the score with a generated one. The replaced text and the
+-- generated one are both kept as versions.
+generate :: Session -> Emit -> GenSettings -> IO (Either ServiceError Value)
+generate s emit g = case validateSettings g of
+    problems@(_ : _) -> return . Left $ ServiceError InvalidValue "The generator settings are not valid"
+        (Just (object ["params" .= [ ParamError k m | (k, m) <- problems ]]))
+    [] -> do
+        let txt = printSong (generateScore g)
+        replaceScore s emit txt $ \st ->
+            let kept = keepCurrent "Before generating" st
+                again = map versionText (take 1 (stVersions kept)) == [txt]
+            in \rev -> if again then kept
+                       else pushVersion (ScoreVersion 0 ("Generated: " <> settingsLabel g) txt rev (Just g)) kept
+
+-- | Bring back a kept version; the text it replaces is kept first.
+restoreVersion :: Session -> Emit -> Int -> IO (Either ServiceError Value)
+restoreVersion s emit vid = do
+    found <- withMVar (sState s) (\st -> return (filter ((== vid) . versionId) (stVersions st)))
+    case found of
+        [] -> return (Left (ServiceError InvalidValue "There is no such version" Nothing))
+        (v : _) -> replaceScore s emit (versionText v) $ \st ->
+            let kept = keepCurrent ("Before restoring " <> T.toLower (T.take 1 (versionLabel v)) <> T.drop 1 (versionLabel v)) st
+            in const kept
+
+-- | Set the score text and update the kept versions in one step. @keep@
+-- sees the state before the change and the revision after it; only its
+-- versions are used.
+replaceScore :: Session -> Emit -> Text -> (St -> Revision -> St) -> IO (Either ServiceError Value)
+replaceScore s emit txt keep = modifyMVar (sState s) $ \st ->
+    applyLocked s emit (SetScoreText txt) st >>= \r -> case r of
+        Left e -> return (st, Left e)
+        Right st' -> do
+            let versions = keep st (projectRevision (stProject st'))
+                kept = st' { stVersions = stVersions versions, stNextVersion = stNextVersion versions }
+            v <- projectViewLocked kept
+            return (kept, Right v)
 
 -------------------------------------------------------------------------------
 -- Rendering

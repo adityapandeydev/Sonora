@@ -10,7 +10,7 @@ import qualified Data.Aeson.KeyMap as KM
 import Data.IORef
 import qualified Data.Map.Strict as Map
 import qualified Data.Set as Set
-import Data.Maybe (fromJust, mapMaybe)
+import Data.Maybe (fromJust, listToMaybe, mapMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.IO as TIO
@@ -29,6 +29,7 @@ import Sonora.Render.Engine (normalizeSignal, renderSong)
 import Sonora.Service.Methods (applicationMethods, serialMethods)
 import Sonora.Service.Protocol
 import Sonora.Service.Session
+import Sonora.Generate.Score (GenSettings (..))
 import Sonora.Signal.Core
 
 -------------------------------------------------------------------------------
@@ -389,6 +390,55 @@ scenarios =
         return $ code early == NoRender && all ((== InvalidValue) . code) bad
             && either (const False) (\v -> num ["jobId"] v == Just 1
                 && maybe False (\p -> case p of { Array a -> length a == 100; _ -> False }) (path ["peaks"] v)) r)
+
+    , ("Generating keeps the replaced score and the result as versions", withHarness fakes $ \h -> do
+        let s = hSession h
+            g = GenSettings 42 "D" "dorian" 98 4
+        Right v <- generate s (hEmit h) g
+        let txt = str ["scoreText"] v
+            versions = maybe [] (\x -> case x of { Array a -> foldr (:) [] a; _ -> [] }) (path ["versions"] v)
+            labels = mapMaybe (str ["label"]) versions
+            currents = [ path ["current"] x | x <- versions ]
+        rendered <- waitUntil h (finishedCount 1)
+        -- the same settings again add nothing
+        Right v2 <- generate s (hEmit h) g
+        let count2 = maybe 0 (\x -> case x of { Array a -> length a; _ -> 0 }) (path ["versions"] v2)
+        return $ fmap (T.isPrefixOf "title \"Generated: D dorian, 98 bpm, 4 bars, seed 42\"") txt == Just True
+            && labels == ["Generated: D dorian, 98 bpm, 4 bars, seed 42", "Before generating"]
+            && currents == [Just (Bool True), Just (Bool False)]
+            && (num ["settings", "seed"] =<< listToMaybe versions) == Just 42
+            && path ["settings"] (versions !! 1) == Just Null
+            && rendered && count2 == 2)
+
+    , ("Restoring brings back a version and keeps the edited text first", withHarness fakes $ \h -> do
+        let s = hSession h
+        Right _ <- generate s (hEmit h) (GenSettings 1 "C" "major" 120 2)
+        _ <- setScore s (hEmit h) scoreB   -- an edit after generating
+        Right v <- restoreVersion s (hEmit h) 1  -- "Before generating": scoreA
+        let versions = maybe [] (\x -> case x of { Array a -> foldr (:) [] a; _ -> [] }) (path ["versions"] v)
+        missing <- restoreVersion s (hEmit h) 99
+        return $ str ["scoreText"] v == Just scoreA
+            && mapMaybe (str ["label"]) versions
+                == ["Before restoring before generating", "Generated: C major, 120 bpm, 2 bars, seed 1", "Before generating"]
+            && str ["scoreText"] v /= Nothing
+            && code missing == InvalidValue)
+
+    , ("Invalid generator settings change nothing and name the fields", withHarness fakes $ \h -> do
+        r <- generate (hSession h) (hEmit h) (GenSettings 1 "H" "major" 300 8)
+        v <- projectView (hSession h)
+        let fields = case r of
+                Left (ServiceError InvalidValue _ (Just d)) -> case path ["params"] d of
+                    Just (Array a) -> mapMaybe (str ["path"]) (foldr (:) [] a)
+                    _ -> []
+                _ -> []
+        return (fields == ["root", "bpm"] && str ["scoreText"] v == Just scoreA))
+
+    , ("At most thirty versions are kept, newest first", withHarness fakes $ \h -> do
+        let s = hSession h
+        mapM_ (\seed -> generate s (hEmit h) (GenSettings seed "C" "major" 120 1)) [1 .. 40]
+        v <- projectView s
+        let ids = maybe [] (\x -> case x of { Array a -> mapMaybe (num ["id"]) (foldr (:) [] a); _ -> [] }) (path ["versions"] v)
+        return (length ids == maxVersions && ids == reverse [12 .. 41]))
 
     , ("Every state-changing method is serial", withHarness fakes $ \h ->
         return (Map.keysSet (applicationMethods (hSession h)) == Set.insert "project.timing" (Set.insert "render.peaks" serialMethods)))

@@ -59,11 +59,13 @@ library
         Sonora.DSL.AST
         Sonora.DSL.Lexer
         Sonora.DSL.Parser
+        Sonora.DSL.Print
         Sonora.DSL.Evaluator
         Sonora.Generate.Random
         Sonora.Generate.Melody
         Sonora.Generate.Progression
         Sonora.Generate.Procedural
+        Sonora.Generate.Score
         Sonora.Synth.Patch
         Sonora.Project.Types
         Sonora.Project.Score
@@ -150,6 +152,7 @@ test-suite sonora-test
         ProjectSpec
         SessionSpec
         LayoutSpec
+        GenerateSpec
     build-tool-depends:
         sonora:sonora-service
     build-depends:
@@ -159,6 +162,7 @@ test-suite sonora-test
         bytestring,
         containers,
         directory,
+        filepath,
         process,
         QuickCheck >= 2.14,
         text,

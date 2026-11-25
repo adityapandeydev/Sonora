@@ -4,6 +4,7 @@ module Sonora.Generate.Progression
     , voiceLead
     , progressionToMusic
     , commonProgressions
+    , diatonicChordOnDegree
     ) where
 
 import Sonora.Generate.Random

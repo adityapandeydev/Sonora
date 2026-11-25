@@ -32,6 +32,12 @@ import Sonora.Service.Session
 --   are @invalid_value@.
 -- * @render.peaks@ @{buckets}@ → waveform overview of the latest render.
 -- * @project.timing@ → when each line of the last valid score sounds.
+-- * @project.generate@ @{settings: {seed, root, scale, bpm, bars}}@ → project
+--   view; replaces the score with a generated one, keeping the replaced text
+--   and the result in @versions@. Invalid settings are @invalid_value@ with
+--   the parameters at fault.
+-- * @project.restoreVersion@ @{id}@ → project view; brings back a kept score,
+--   keeping the text it replaces.
 --
 -- Events: @render.started@, @render.progress@, @render.finished@,
 -- @render.failed@, @render.cancelled@ (all carry @jobId@ and @revision@),
@@ -56,6 +62,8 @@ applicationMethods s = Map.fromList
     , ("transport.setVolume", \ctx params -> withParams (.: "volume") params (setVolume s (contextEmit ctx)))
     , ("render.peaks", \_ params -> withParams (.: "buckets") params (renderPeaks s))
     , ("project.timing", \_ _ -> Right <$> scoreTiming s)
+    , ("project.generate", \ctx params -> withParams (.: "settings") params (generate s (contextEmit ctx)))
+    , ("project.restoreVersion", \ctx params -> withParams (.: "id") params (restoreVersion s (contextEmit ctx)))
     ]
 
 withParams :: (Object -> Parser a) -> Value -> (a -> IO (Either ServiceError Value)) -> IO (Either ServiceError Value)
@@ -75,7 +83,8 @@ serialMethods :: Set.Set Text
 serialMethods = Set.fromList
     [ "project.get", "project.setScore", "project.apply", "render.start", "render.cancel"
     , "transport.play", "transport.pause", "transport.stop", "transport.state"
-    , "transport.seek", "transport.setLoop", "transport.setVolume" ]
+    , "transport.seek", "transport.setLoop", "transport.setVolume"
+    , "project.generate", "project.restoreVersion" ]
 
 -- | Methods for exercising the protocol from tests and host integration
 -- checks. Only served when the service is started with

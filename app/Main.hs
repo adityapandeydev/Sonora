@@ -18,6 +18,10 @@ import qualified Data.Vector.Storable as V
 import Sonora
 import Sonora.Audio.Backend
 import Sonora.Audio.Device (withDeviceBackend)
+import qualified Data.Text as T
+import qualified Data.Text.IO as TIO
+import Sonora.DSL.Print (printSong)
+import Sonora.Generate.Score (GenSettings (..), generateScore, rootTable, scaleTable, validateSettings)
 
 -- | CLI Subcommands
 data Command
@@ -227,12 +231,26 @@ runPlay PlayOptions{..} = do
 
 runGenerate :: GenerateOptions -> IO ()
 runGenerate GenerateOptions{..} = do
-    let (root, sType) = parseScaleString goScale
-        song = generateProceduralSong (Seed goSeed) sType root (BPM goBPM) goBars
-        dslContent = songToDSL song
+    let (PitchClass rootPitch _, sType) = parseScaleString goScale
+        settings = GenSettings
+            { genSeed = goSeed
+            , genRoot = maybe "C" fst (lookup rootPitch [ (pc, (n, pc)) | (n, pc) <- rootTable ])
+            , genScale = maybe "major" id (lookup sType [ (t, n) | (n, t) <- scaleTable ])
+            , genBPM = goBPM
+            , genBars = goBars
+            }
+    case validateSettings settings of
+        [] -> return ()
+        problems -> do
+            mapM_ (\(_, msg) -> hPutStrLn stderr ("[Sonora] " ++ T.unpack msg)) problems
+            exitFailure
+    let ast = generateScore settings
+        dslText = printSong ast
+        dslContent = T.unpack dslText
+        song = evaluateSong ast
 
     case goOutput of
-        Just dslPath -> writeFile dslPath dslContent
+        Just dslPath -> TIO.writeFile dslPath dslText
         Nothing      -> return ()
 
     case goRenderWav of
@@ -260,7 +278,7 @@ runGenerate GenerateOptions{..} = do
                 Nothing ->
                     when (goOutput == Nothing) $ do
                         let defPath = "procedural_seed_" ++ show goSeed ++ ".sonora"
-                        writeFile defPath dslContent
+                        TIO.writeFile defPath dslText
                         putStrLn $ "[Sonora] Wrote score to default path: " ++ defPath
 
 runInspect :: InspectOptions -> IO ()
