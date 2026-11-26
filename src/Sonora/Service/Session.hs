@@ -53,6 +53,10 @@ module Sonora.Service.Session
     , updateAudition
     , releaseAudition
     , stopAudition
+    , ExportRequest (..)
+    , startExport
+    , cancelExport
+    , exportRates
     , maxVersions
     , maxPeakBuckets
     , minLoopSeconds
@@ -76,12 +80,18 @@ import Sonora.DSL.Print (printSong)
 import Sonora.Generate.Score
 import Sonora.Project.Compile
 import Sonora.Project.Layout (outline, songInfo, timing)
-import Sonora.Project.Render (renderCompiled)
+import Sonora.Project.Render (Stems, emptyStems, renderProject)
+import Sonora.Render.WAV (BitDepth (..), encodeWAV)
+import qualified Data.ByteString.Lazy as BL
+import System.Directory (doesDirectoryExist, removeFile, renameFile)
+import System.FilePath (takeDirectory, takeExtension)
+import System.IO.Error (ioeGetErrorType, isAlreadyInUseError, isDoesNotExistError, isFullError, isPermissionError)
+import GHC.IO.Exception (IOErrorType (InappropriateType))
 import Sonora.Project.Score (scorePatches)
 import Sonora.Project.Types
 import Sonora.Project.Update
 import Sonora.Service.Protocol
-import Sonora.Signal.Core (Frame)
+import Sonora.Signal.Core (AudioConfig (..), Frame, defaultConfig)
 import Sonora.Signal.Waveform (waveformPeaks)
 import Sonora.Synth.Patch (ParamError (..), Patch, validatePatch)
 
@@ -90,7 +100,7 @@ type Emit = Event -> IO ()
 data SessionConfig = SessionConfig
     { sessionSampleRate   :: !Int
       -- | Renders a compiled project, reporting @(completed, total)@ progress.
-    , sessionRenderer     :: Int -> (Int -> Int -> IO ()) -> CompiledProject -> IO (V.Vector Frame)
+    , sessionRenderer     :: Int -> (Int -> Int -> IO ()) -> Stems -> CompiledProject -> IO (Stems, V.Vector Frame)
     , sessionOpenAudio    :: Int -> IO (Either AudioError AudioBackend)
     , sessionInitialScore :: !Text
       -- | Interval between @transport@ events while playing, in microseconds.
@@ -102,7 +112,7 @@ data SessionConfig = SessionConfig
 defaultSessionConfig :: SessionConfig
 defaultSessionConfig = SessionConfig
     { sessionSampleRate      = 44100
-    , sessionRenderer        = renderCompiled
+    , sessionRenderer        = renderProject
     , sessionOpenAudio       = openDeviceBackend
     , sessionInitialScore    = starterScore
     , sessionTelemetryMicros = 40000
@@ -177,6 +187,21 @@ data St = St
     , stNextVersion :: !Int
     , stAudition :: !(Maybe Audition)      -- ^ The note being auditioned.
     , stNextAudition :: !Int
+    , stStems :: !Stems                    -- ^ Rendered tracks, reused while they apply.
+    , stExport :: !(Maybe ExportJob)
+    , stNextExport :: !Int
+    }
+
+data ExportJob = ExportJob
+    { exportId     :: !Int
+    , exportThread :: !ThreadId
+    , exportPart   :: !FilePath  -- ^ Written first, renamed when complete.
+    }
+
+data ExportRequest = ExportRequest
+    { exportPath     :: !FilePath
+    , exportRate     :: !Int
+    , exportBitDepth :: !Int  -- ^ 16, 24, or 32 (float).
     }
 
 -- | One auditioned note. Each change (a new patch, the release) renders it
@@ -227,6 +252,9 @@ newSession cfg = Session cfg <$> newMVar St
     , stNextVersion = 1
     , stAudition = Nothing
     , stNextAudition = 1
+    , stStems = emptyStems
+    , stExport = Nothing
+    , stNextExport = 1
     }
 
 -- | Stop rendering and playback and release the audio device.
@@ -235,6 +263,7 @@ closeSession s = modifyMVar_ (sState s) $ \st -> do
     forM_ (stRunning st) (killThread . jobThread)
     forM_ (stWatcher st) killThread
     forM_ (stAudition st >>= auWorker) killThread
+    forM_ (stExport st) (killThread . exportThread)
     forM_ (stAudio st) backendClose
     return st { stRunning = Nothing, stWatcher = Nothing, stAudio = Nothing, stLoaded = Nothing, stAudition = Nothing }
 
@@ -399,6 +428,98 @@ replaceScore s emit txt keep = modifyMVar (sState s) $ \st ->
             return (kept, Right v)
 
 -------------------------------------------------------------------------------
+-- Export
+
+exportRates :: [Int]
+exportRates = [44100, 48000, 96000]
+
+-- | Render the project as it is now to a WAV file. The revision is captured
+-- when the export starts; later edits do not change the file. The file
+-- appears only when complete: it is written next to its final name first.
+startExport :: Session -> Emit -> ExportRequest -> IO (Either ServiceError Value)
+startExport s emit req = modifyMVar (sState s) $ \st -> do
+    dirOk <- doesDirectoryExist (takeDirectory (exportPath req))
+    folderInTheWay <- doesDirectoryExist (exportPath req)
+    let problems = concat
+            [ [ ParamError "path" "Choose a file name ending in .wav" | map toLower' (takeExtension (exportPath req)) /= ".wav" ]
+            , [ ParamError "path" ("The folder " <> T.pack (takeDirectory (exportPath req)) <> " does not exist") | not dirOk ]
+            , [ ParamError "path" "There is a folder with this name; choose another file name" | folderInTheWay ]
+            , [ ParamError "sampleRate" "Use 44100, 48000 or 96000 Hz" | exportRate req `notElem` exportRates ]
+            , [ ParamError "bitDepth" "Use 16, 24 or 32 bits" | exportBitDepth req `notElem` [16, 24, 32] ]
+            ]
+    case (problems, compileProject (stProject st), stExport st) of
+        (_ : _, _, _) -> return (st, Left (invalidParams problems))
+        (_, _, Just _) -> return (st, Left (ServiceError InvalidValue "An export is already running" Nothing))
+        (_, Nothing, _) -> return (st, Left (serviceError NoRender "There is nothing to export: the score has never been valid"))
+        ([], Just compiled, Nothing) -> do
+            let eid = stNextExport st
+                rev = compiledRevision compiled
+                part = exportPath req ++ ".part"
+                rate = exportRate req
+                -- Stems at the playback rate are reused; other rates render afresh.
+                stems = if rate == sessionSampleRate (sConfig s) then stStems st else emptyStems
+            emit (Event "export.started" (object ["exportId" .= eid, "revision" .= rev, "path" .= exportPath req]))
+            tid <- forkIO (runExport s emit eid rev req part stems compiled)
+            return ( st { stExport = Just (ExportJob eid tid part), stNextExport = eid + 1 }
+                   , Right (object ["exportId" .= eid, "revision" .= rev]) )
+  where
+    toLower' c = if c >= 'A' && c <= 'Z' then toEnum (fromEnum c + 32) else c
+
+runExport :: Session -> Emit -> Int -> Revision -> ExportRequest -> FilePath -> Stems -> CompiledProject -> IO ()
+runExport s emit eid rev req part stems compiled = do
+    let rate = exportRate req
+        depth = case exportBitDepth req of
+            16 -> BitDepth16
+            24 -> BitDepth24
+            _  -> BitDepth32Float
+        progress done total = emit $ Event "export.progress" $ object
+            ["exportId" .= eid, "completed" .= done, "total" .= (total + 1)]
+    result <- try $ do
+        (_, frames) <- sessionRenderer (sConfig s) rate progress stems compiled
+        let bytes = encodeWAV depth defaultConfig { configSampleRate = rate } frames
+        BL.writeFile part bytes
+        renameFile part (exportPath req)
+        return (V.length frames, BL.length bytes)
+    case result of
+        Left (e :: SomeException) | Just (_ :: SomeAsyncException) <- fromException e -> throwIO e
+        _ -> modifyMVar_ (sState s) $ \st -> do
+            case result of
+                Right (frames, size) -> emit $ Event "export.finished" $ object
+                    [ "exportId" .= eid, "revision" .= rev, "path" .= exportPath req
+                    , "sampleRate" .= rate, "bitDepth" .= exportBitDepth req, "frames" .= frames
+                    , "seconds" .= (fromIntegral frames / fromIntegral rate :: Double), "bytes" .= size ]
+                Left e -> do
+                    _ <- try (removeFile part) :: IO (Either SomeException ())
+                    emit $ Event "export.failed" $ object
+                        ["exportId" .= eid, "message" .= exportFailure (exportPath req) e]
+            return st { stExport = Nothing }
+
+isInappropriate :: IOError -> Bool
+isInappropriate io = case ioeGetErrorType io of
+    InappropriateType -> True
+    _ -> False
+
+-- | Words for an export failure that say what to do about it.
+exportFailure :: FilePath -> SomeException -> Text
+exportFailure path e = case fromException e of
+    Just io
+        | isPermissionError io -> "Sonora is not allowed to write " <> T.pack path <> ". Choose another folder, or check the file is not read-only."
+        | isAlreadyInUseError io -> T.pack path <> " is open in another program. Close it there, or choose another name."
+        | isFullError io -> "The disk is full. Free some space, or choose another drive."
+        | isDoesNotExistError io -> "The folder for " <> T.pack path <> " no longer exists. Choose another folder."
+        | isInappropriate io -> "Sonora could not write " <> T.pack path <> " (" <> plainMessage e <> "). Choose another file name."
+    _ -> "The export failed: " <> plainMessage e <> ". Try again, or choose another folder."
+
+cancelExport :: Session -> Emit -> IO Value
+cancelExport s emit = modifyMVar (sState s) $ \st -> case stExport st of
+    Nothing -> return (st, object ["cancelled" .= False])
+    Just job -> do
+        killThread (exportThread job)
+        _ <- try (removeFile (exportPart job)) :: IO (Either SomeException ())
+        emit (Event "export.cancelled" (object ["exportId" .= exportId job]))
+        return (st { stExport = Nothing }, object ["cancelled" .= True])
+
+-------------------------------------------------------------------------------
 -- Audition
 
 auditionProblems :: Patch -> Int -> Double -> [ParamError]
@@ -509,7 +630,7 @@ renderAuditionLocked s emit au = do
                     Left e -> do
                         emit $ Event "audition" $ object
                             [ "auditionId" .= aid, "revision" .= rev, "state" .= ("failed" :: Text)
-                            , "message" .= T.pack (displayException e) ]
+                            , "message" .= plainMessage e ]
                         return st { stAudition = Just now { auWorker = Nothing } }
                 _ -> return st
     return au { auRevision = rev, auWorker = Just tid }
@@ -549,7 +670,7 @@ startRenderLocked s emit retryFailed st = case compileProject (stProject st) of
                 emit (Event "render.started" (object ["jobId" .= jid, "revision" .= rev]))
                 -- The worker reports back through the session lock, which we
                 -- hold, so it cannot finish before it is registered.
-                tid <- forkIO (runJob s emit jid rev inputs compiled)
+                tid <- forkIO (runJob s emit jid rev inputs (stStems st1) compiled)
                 return st1 { stNextJob = jid + 1, stRunning = Just (Job jid rev inputs tid), stFailure = Nothing }
 
 cancelRunningLocked :: Emit -> St -> IO St
@@ -562,12 +683,12 @@ cancelRunningLocked emit st = case stRunning st of
         emit (Event "render.cancelled" (object ["jobId" .= jobId j, "revision" .= jobRevision j]))
         return st { stRunning = Nothing }
 
-runJob :: Session -> Emit -> Int -> Revision -> RenderInputs -> CompiledProject -> IO ()
-runJob s emit jid rev inputs compiled = do
+runJob :: Session -> Emit -> Int -> Revision -> RenderInputs -> Stems -> CompiledProject -> IO ()
+runJob s emit jid rev inputs stems compiled = do
     t0 <- getMonotonicTime
     let progress done total = emit $ Event "render.progress" $ object
             ["jobId" .= jid, "revision" .= rev, "completed" .= done, "total" .= total]
-    result <- try (sessionRenderer (sConfig s) (sessionSampleRate (sConfig s)) progress compiled)
+    result <- try (sessionRenderer (sConfig s) (sessionSampleRate (sConfig s)) progress stems compiled)
     t1 <- getMonotonicTime
     case result of
         Left (e :: SomeException) | Just (_ :: SomeAsyncException) <- fromException e -> throwIO e
@@ -575,13 +696,13 @@ runJob s emit jid rev inputs compiled = do
             if fmap jobId (stRunning st) /= Just jid
                 then return st  -- superseded while finishing
                 else case result of
-                    Right frames -> do
+                    Right (stems', frames) -> do
                         let fin = Finished jid rev inputs frames (sessionSampleRate (sConfig s)) (round ((t1 - t0) * 1000))
                             isCurrent = inputs == renderInputs (stProject st)
                         emit (Event "render.finished" (finishedJson fin isCurrent))
-                        swapIn emit st { stRunning = Nothing, stFinished = Just fin }
+                        swapIn emit st { stRunning = Nothing, stFinished = Just fin, stStems = stems' }
                     Left e -> do
-                        let msg = T.pack (displayException e)
+                        let msg = plainMessage e
                         emit $ Event "render.failed" $ object ["jobId" .= jid, "revision" .= rev, "message" .= msg]
                         return st { stRunning = Nothing, stFailure = Just (Failure jid rev inputs msg) }
 

@@ -44,7 +44,8 @@ data CompiledTrack = CompiledTrack
     { compiledTrackId     :: !TrackId
     , compiledPatch       :: !Patch
     , compiledPatchSource :: !PatchSource
-    , compiledMix         :: !TrackMix  -- ^ Carried for the mixer; not applied by 'compiledSong'.
+    , compiledMix         :: !TrackMix  -- ^ Applied by "Sonora.Project.Mix"; not by 'compiledSong'.
+    , compiledItems       :: ![ASTItem] -- ^ The track's notes as written, without source lines.
     , compiledTrack       :: !Track
     }
 
@@ -80,6 +81,7 @@ compileProject p = do
                 , compiledPatch       = patch
                 , compiledPatchSource = source
                 , compiledMix         = trackMix ts
+                , compiledItems       = astTrackItems astT
                 , compiledTrack       = Track
                     { trackName       = T.unpack (trackScoreName ts)
                     , trackInstrument = compilePatch patch

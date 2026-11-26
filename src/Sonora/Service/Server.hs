@@ -157,9 +157,9 @@ runServer cfg input output = do
                 Left (e :: SomeException)
                     | Just (_ :: SomeAsyncException) <- fromException e -> throwIO e
                     | otherwise -> do
-                        logMsg ("request " <> rid <> " failed: " <> T.pack (displayException e))
+                        logMsg ("request " <> rid <> " failed: " <> plainMessage e)
                         return $ BL.toStrict $ encodeResponse $ Response (Just rid) $
-                            Left (serviceError InternalError (T.pack (displayException e)))
+                            Left (serviceError InternalError (plainMessage e))
             owned <- modifyMVar inflight (\m -> return (Map.delete rid m, Map.member rid m))
             when owned (writeLine (BL.fromStrict encoded))
 

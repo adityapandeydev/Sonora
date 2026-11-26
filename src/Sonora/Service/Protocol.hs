@@ -13,7 +13,8 @@
 -- Responses to messages that could not be attributed to a request (for
 -- example malformed JSON) carry @"id":null@.
 module Sonora.Service.Protocol
-    ( protocolVersion
+    ( plainMessage
+    , protocolVersion
     , supportedVersions
     , RequestId
     , maxRequestIdLength
@@ -30,6 +31,7 @@ module Sonora.Service.Protocol
     , parseParams
     ) where
 
+import Control.Exception (Exception (..), SomeException (..))
 import Data.Aeson
 import Data.Aeson.Types (Parser, parseEither)
 import qualified Data.Aeson.KeyMap as KM
@@ -177,3 +179,8 @@ parseParams p v = either (Left . serviceError InvalidParams . T.pack) Right (par
 
 showT :: Show a => a -> Text
 showT = T.pack . show
+
+-- | An exception's own message, without the runtime's backtrace: the text
+-- for people to read.
+plainMessage :: SomeException -> Text
+plainMessage (SomeException inner) = T.strip (T.pack (displayException inner))

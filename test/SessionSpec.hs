@@ -22,10 +22,16 @@ import Sonora.Audio.Fake
 import Sonora.DSL.Evaluator (evaluateSong)
 import Sonora.DSL.Parser (parseSonora)
 import Sonora.Project.Compile
-import Sonora.Project.Render (renderCompiled)
+import Sonora.Project.Render (Stems, renderCompiled, renderProject)
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as BC
+import Data.Word (Word32)
+import GHC.Float (castWord32ToFloat)
+import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getTemporaryDirectory, listDirectory, removeDirectoryRecursive)
+import System.FilePath ((</>))
 import Sonora.Project.Types (Command (..), MixUpdate (..), Revision (..), TrackId (..), noMixUpdate)
 import Sonora.Project.Update (newProject)
-import Sonora.Render.Engine (normalizeSignal, renderSong)
+import Sonora.Render.Engine (Song (..), normalizeSignal, renderTrack)
 import Sonora.Service.Methods (applicationMethods, serialMethods)
 import Sonora.Service.Protocol
 import Sonora.Service.Session
@@ -52,10 +58,44 @@ data Fakes = Fakes
     , renderFails   :: Bool
     , audioFails    :: Bool
     , auditionDelayMs :: Int
+    , realRenderAt  :: Maybe Int  -- ^ Render for real at this sample rate.
     }
 
 fakes :: Fakes
-fakes = Fakes 0 False False 0
+fakes = Fakes 0 False False 0 Nothing
+
+-- | A fresh, empty folder for files a test writes.
+scratchDir :: String -> IO FilePath
+scratchDir name = do
+    tmp <- getTemporaryDirectory
+    let dir = tmp </> ("sonora-test-" ++ name)
+    exists <- doesDirectoryExist dir
+    when exists (removeDirectoryRecursive dir)
+    createDirectoryIfMissing True dir
+    return dir
+
+data Wav = Wav { wavFormat :: Int, wavChannels :: Int, wavRate :: Int, wavBits :: Int, wavData :: BS.ByteString }
+
+readWav :: FilePath -> IO (Maybe Wav)
+readWav file = do
+    raw <- BS.readFile file
+    let u16 at = fromIntegral (BS.index raw at) + 256 * fromIntegral (BS.index raw (at + 1)) :: Int
+        u32 at = u16 at + 65536 * u16 (at + 2)
+        tag at t = BS.take 4 (BS.drop at raw) == BC.pack t
+    return $ if BS.length raw >= 44 && tag 0 "RIFF" && tag 8 "WAVE" && tag 12 "fmt " && tag 36 "data"
+                  && u32 4 == BS.length raw - 8 && u32 40 == BS.length raw - 44
+        then Just (Wav (u16 20) (u16 22) (u32 24) (u16 34) (BS.drop 44 raw))
+        else Nothing
+
+floats :: BS.ByteString -> [Float]
+floats bs
+    | BS.length bs < 4 = []
+    | otherwise =
+        let w = foldr (\i acc -> acc * 256 + fromIntegral (BS.index bs i)) 0 [0 .. 3] :: Word32
+        in castWord32ToFloat w : floats (BS.drop 4 bs)
+
+exportEvents :: Text -> Harness -> IO [Value]
+exportEvents n h = named n <$> events h
 
 -- | Audition buffers whose length identifies the request: the cutoff in
 -- frames plus the gate in milliseconds.
@@ -73,8 +113,8 @@ withCutoff c = (lookupPresetPatchOr "lead") { patchVoice = (patchVoice (lookupPr
   where lookupPresetPatchOr name = maybe defaultPatch id (lookupPresetPatch name)
 
 -- | Frames whose value identifies the revision they were rendered from.
-fakeRenderer :: Fakes -> Int -> (Int -> Int -> IO ()) -> CompiledProject -> IO (V.Vector Frame)
-fakeRenderer f _ progress c = do
+fakeRenderer :: Fakes -> Int -> (Int -> Int -> IO ()) -> Stems -> CompiledProject -> IO (Stems, V.Vector Frame)
+fakeRenderer f _ progress stems c = fmap ((,) stems) $ do
     progress 0 1
     when (renderDelayMs f > 0) $ threadDelay (renderDelayMs f * 1000)
     when (renderFails f) $ throwIO (userError "synthesis exploded")
@@ -90,8 +130,8 @@ withHarness f act = do
     notes <- newIORef []
     fake <- newFakeAudio 1000
     let cfg = defaultSessionConfig
-            { sessionSampleRate      = 1000
-            , sessionRenderer        = fakeRenderer f
+            { sessionSampleRate      = maybe 1000 id (realRenderAt f)
+            , sessionRenderer        = maybe (fakeRenderer f) (const renderProject) (realRenderAt f)
             , sessionOpenAudio       = \_ -> do
                 modifyIORef' opens (+ 1)
                 return $ if audioFails f then Left (AudioError 1 "no output device") else Right (fakeBackend fake)
@@ -163,7 +203,7 @@ check name t = do
 
 scenarios :: [(String, IO Bool)]
 scenarios =
-    [ ("Renderer matches the CLI render bit for bit and reports progress", do
+    [ ("Renderer gives the tracks' sum normalised to 0.95, bit for bit, and reports progress", do
         txt <- TIO.readFile "examples/synthwave.sonora"
         steps <- newIORef []
         let compiled = fromJust (compileProject (newProject txt))
@@ -172,7 +212,9 @@ scenarios =
         return $ case parseSonora "x" (T.unpack txt) of
             Left _ -> False
             Right ast ->
-                out == runSignal (normalizeSignal 0.95 (renderSong (evaluateSong ast))) (AudioConfig 8000 2)
+                let song = evaluateSong ast
+                    tracks = map (renderTrack (songBPM song)) (songTracks song)
+                in out == runSignal (normalizeSignal 0.95 (foldl mixSignals emptySignal tracks)) (AudioConfig 8000 2)
                 && progress == [(0, 4), (1, 4), (2, 4), (3, 4), (4, 4)])
 
     , ("Render is tagged with job and revision and is current", withHarness fakes $ \h -> do
@@ -540,6 +582,90 @@ scenarios =
                 _ -> []
         notes <- readIORef (hNotes h)
         return (fields r1 == ["patch.filter.cutoff"] && fields r2 == ["pitch", "velocity"] && null notes))
+
+    , ("Export writes the revision it started with, in the chosen format", withHarness fakes { renderDelayMs = 100 } $ \h -> do
+        dir <- scratchDir "export"
+        let s = hSession h
+            out = dir </> "song.wav"
+        Right r <- startExport s (hEmit h) (ExportRequest out 48000 32)
+        _ <- setScore s (hEmit h) scoreB   -- edited while exporting
+        done <- waitUntil h (not . null . named "export.finished")
+        [fin] <- exportEvents "export.finished" h
+        wav <- readWav out
+        files <- listDirectory dir
+        let rev = fromJust (num ["revision"] r)
+        return $ done && files == ["song.wav"]
+            && num ["revision"] fin == Just rev && str ["path"] fin == Just (T.pack out)
+            && num ["sampleRate"] fin == Just 48000 && num ["bitDepth"] fin == Just 32 && num ["frames"] fin == Just 4000
+            && case wav of
+                Just w -> wavFormat w == 3 && wavChannels w == 2 && wavRate w == 48000 && wavBits w == 32
+                    && BS.length (wavData w) == 4000 * 8
+                    && take 2 (floats (wavData w)) == replicate 2 (realToFrac (rev / 100))
+                Nothing -> False)
+
+    , ("16 and 24-bit exports have the matching layout", withHarness fakes $ \h -> do
+        dir <- scratchDir "depths"
+        oks <- forM [(16, 4), (24, 6)] $ \(bits, bytes) -> do
+            let out = dir </> ("d" ++ show bits ++ ".wav")
+            Right _ <- startExport (hSession h) (hEmit h) (ExportRequest out 44100 bits)
+            _ <- waitUntil h ((>= (bits `div` 8 - 1)) . length . named "export.finished")
+            w <- readWav out
+            return $ maybe False (\x -> wavFormat x == 1 && wavBits x == bits && wavRate x == 44100
+                && BS.length (wavData x) == 4000 * bytes) w
+        return (and oks))
+
+    , ("Cancelling an export leaves no file behind", withHarness fakes { renderDelayMs = 400 } $ \h -> do
+        dir <- scratchDir "cancel"
+        let s = hSession h
+        Right _ <- startExport s (hEmit h) (ExportRequest (dir </> "gone.wav") 44100 24)
+        busy <- startExport s (hEmit h) (ExportRequest (dir </> "other.wav") 44100 24)
+        threadDelay 50000
+        c1 <- cancelExport s (hEmit h)
+        c2 <- cancelExport s (hEmit h)
+        threadDelay 500000
+        files <- listDirectory dir
+        es <- events h
+        return (null files && path ["cancelled"] c1 == Just (Bool True) && path ["cancelled"] c2 == Just (Bool False)
+                && length (named "export.cancelled" es) == 1 && null (named "export.finished" es)
+                && code busy == InvalidValue))
+
+    , ("Export problems say which setting is wrong, or what to do", withHarness fakes $ \h -> do
+        dir <- scratchDir "problems"
+        let s = hSession h
+            fields r = case r of
+                Left (ServiceError InvalidValue _ (Just d)) -> case path ["params"] d of
+                    Just (Array a) -> mapMaybe (str ["path"]) (foldr (:) [] a)
+                    _ -> []
+                _ -> []
+        r1 <- startExport s (hEmit h) (ExportRequest (dir </> "song.mp3") 22050 8)
+        r2 <- startExport s (hEmit h) (ExportRequest (dir </> "missing" </> "song.wav") 44100 16)
+        -- A folder with the file's name is refused at once.
+        createDirectoryIfMissing True (dir </> "taken.wav")
+        r3 <- startExport s (hEmit h) (ExportRequest (dir </> "taken.wav") 44100 16)
+        -- A folder where the temporary file goes: the write fails after rendering.
+        createDirectoryIfMissing True (dir </> "late.wav.part")
+        Right _ <- startExport s (hEmit h) (ExportRequest (dir </> "late.wav") 44100 16)
+        _ <- waitUntil h (not . null . named "export.failed")
+        [failed] <- exportEvents "export.failed" h
+        final <- doesFileExist (dir </> "late.wav")
+        let message = maybe "" id (str ["message"] failed)
+        return (fields r1 == ["path", "sampleRate", "bitDepth"] && fields r2 == ["path"] && fields r3 == ["path"]
+                && "late.wav" `T.isInfixOf` message && "Choose" `T.isInfixOf` message
+                && not ("backtrace" `T.isInfixOf` T.toLower message) && not final))
+
+    , ("The exported file is exactly what plays", withHarness fakes { realRenderAt = Just 44100 } $ \h -> do
+        dir <- scratchDir "same"
+        let s = hSession h
+            out = dir </> "same.wav"
+        _ <- startRender s (hEmit h)
+        _ <- waitUntil h (finishedCount 1)
+        _ <- play s (hEmit h)
+        playing <- fakeFrames (hFake h) SongVoice
+        Right _ <- startExport s (hEmit h) (ExportRequest out 44100 32)
+        _ <- waitUntil h (not . null . named "export.finished")
+        w <- readWav out
+        let expected = concat [ [realToFrac l, realToFrac r] | Frame l r <- V.toList playing ] :: [Float]
+        return (V.length playing > 1000 && maybe False ((== expected) . floats . wavData) w))
 
     , ("Every state-changing method is serial", withHarness fakes $ \h ->
         return (Map.keysSet (applicationMethods (hSession h)) == Set.insert "project.timing" (Set.insert "render.peaks" serialMethods)))

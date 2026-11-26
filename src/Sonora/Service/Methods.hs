@@ -47,12 +47,20 @@ import Sonora.Synth.Patch (Patch)
 --   → @{auditionId, active}@; change the sounding note's sound, or let it
 --   release. @active@ is false when the note was replaced or stopped.
 -- * @audition.stop@ → silences the audition.
+-- * @export.start@ @{path, sampleRate?, bitDepth?}@ → @{exportId, revision}@;
+--   writes the project as it is now to a WAV file (44100, 48000 or 96000 Hz;
+--   16, 24 or 32-bit float; defaults 44100 and 24). The file appears only
+--   when complete. Errors: @invalid_value@ (with @params@), @no_render@.
+-- * @export.cancel@ → @{cancelled}@.
 --
 -- Events: @render.started@, @render.progress@, @render.finished@,
 -- @render.failed@, @render.cancelled@ (all carry @jobId@ and @revision@),
 -- @transport@ (on changes, and periodically while playing), and @audition@
 -- (@{auditionId, revision, state: "playing" | "failed"}@ as each render of
--- the note reaches the speaker or fails).
+-- the note reaches the speaker or fails), and @export.started@,
+-- @export.progress@, @export.finished@ (with path, sampleRate, bitDepth,
+-- frames, seconds, bytes), @export.failed@ (a message saying what to do),
+-- @export.cancelled@.
 applicationMethods :: Session -> Map.Map Text Handler
 applicationMethods s = Map.fromList
     [ ("project.get", \_ _ -> Right <$> projectView s)
@@ -81,6 +89,9 @@ applicationMethods s = Map.fromList
         (uncurry (updateAudition s (contextEmit ctx))))
     , ("audition.release", \ctx params -> withParams (.: "auditionId") params (releaseAudition s (contextEmit ctx)))
     , ("audition.stop", \ctx _ -> Right <$> stopAudition s (contextEmit ctx))
+    , ("export.start", \ctx params -> withParams (\o -> ExportRequest <$> o .: "path" <*> o .:? "sampleRate" .!= 44100 <*> o .:? "bitDepth" .!= 24) params
+        (startExport s (contextEmit ctx)))
+    , ("export.cancel", \ctx _ -> Right <$> cancelExport s (contextEmit ctx))
     ]
 
 startParams :: Object -> Parser (Patch, Int, Double)
@@ -105,7 +116,8 @@ serialMethods = Set.fromList
     , "transport.play", "transport.pause", "transport.stop", "transport.state"
     , "transport.seek", "transport.setLoop", "transport.setVolume"
     , "project.generate", "project.restoreVersion"
-    , "audition.start", "audition.update", "audition.release", "audition.stop" ]
+    , "audition.start", "audition.update", "audition.release", "audition.stop"
+    , "export.start", "export.cancel" ]
 
 -- | Methods for exercising the protocol from tests and host integration
 -- checks. Only served when the service is started with
