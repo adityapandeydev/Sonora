@@ -28,6 +28,8 @@ interface Props {
   onCancelRender: () => void;
   /** Send a project command; resolves once the engine has applied it. */
   onCommand: (command: unknown) => Promise<unknown>;
+  /** Send a project command and report a failure in the workspace. */
+  onAct: (command: unknown) => void;
 }
 
 function renderStatus(project: ProjectView, progress: RenderProgress | null): string {
@@ -316,7 +318,15 @@ export function Workspace(props: Props) {
       ) : null}
       </div>
       <main className="work" style={{ gridTemplateColumns: columns }}>
-        <TrackList tracks={tracks} selected={selected?.id ?? null} problems={perTrack} onSelect={setSelectedId} />
+        <TrackList
+          tracks={tracks}
+          selected={selected?.id ?? null}
+          problems={perTrack}
+          master={project.master.gain}
+          onSelect={setSelectedId}
+          onMix={(t, change) => props.onAct({ type: "updateTrackMix", track: t.id, ...change })}
+          onMaster={(gain) => props.onAct({ type: "setMasterGain", gain })}
+        />
         {compact ? (
           <div className="centre">
             <div className="tabs" role="tablist" aria-label="View">

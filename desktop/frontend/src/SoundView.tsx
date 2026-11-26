@@ -395,9 +395,13 @@ export function SoundView({ track, colour, songStatus, onApply, onReset }: Props
       : applying > 0
         ? "Applying"
         : songStatus === "rendering"
-          ? "Applied. The song is rendering with it"
+          ? track.hasPatchOverride
+            ? "Applied. The song is rendering with it"
+            : "The song is rendering"
           : songStatus === "unrendered"
-            ? "Applied. The song is not rendered with it yet"
+            ? track.hasPatchOverride
+              ? "Applied. The song is not rendered with it yet"
+              : "The song is not rendered yet"
             : "The song plays this sound";
 
   return (

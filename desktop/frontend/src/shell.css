@@ -154,12 +154,103 @@
 
 .track {
   display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 2px var(--space-2);
+  padding: 7px var(--space-3) 7px var(--space-4);
+  border-bottom: 1px solid var(--line);
+  cursor: pointer;
+}
+
+.track-select {
+  display: grid;
   grid-template-columns: 10px minmax(0, 1fr) auto;
   align-items: center;
   gap: 2px var(--space-3);
-  padding: 9px var(--space-3) 9px var(--space-4);
-  border-bottom: 1px solid var(--line);
+  min-width: 0;
+  padding: 2px 0;
+  border: 0;
+  background: none;
+  text-align: left;
   cursor: pointer;
+}
+
+.track-select:focus-visible {
+  outline-offset: 0;
+  border-radius: 4px;
+}
+
+.track.silent .track-select b,
+.track.silent .swatch {
+  opacity: 0.5;
+}
+
+.mix-toggles {
+  display: flex;
+  gap: 4px;
+}
+
+.toggle {
+  width: 24px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--control-line);
+  border-radius: 4px;
+  background: var(--page);
+  color: var(--ink-2);
+  font: 600 11px / 1 var(--sans);
+  cursor: pointer;
+}
+
+.toggle[aria-pressed="true"] {
+  border-color: var(--warn);
+  background: var(--warn);
+  color: var(--page);
+}
+
+.toggle.solo[aria-pressed="true"] {
+  border-color: var(--sel);
+  background: var(--sel);
+  color: var(--on-sel);
+}
+
+.track-mix {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: 4px;
+  padding-top: 6px;
+  cursor: default;
+  --slider-label: 40px;
+  --slider-value: 64px;
+}
+
+.tracks .master {
+  flex: none;
+  padding: var(--space-3) var(--space-3) var(--space-3) var(--space-4);
+  border-top: 1px solid var(--line);
+  --slider-label: 52px;
+  --slider-value: 64px;
+}
+
+.export-progress {
+  display: grid;
+  gap: var(--space-2);
+}
+
+.export-progress progress {
+  width: 100%;
+  accent-color: var(--sel);
+}
+
+.export-done {
+  display: grid;
+  gap: var(--space-1);
+  margin: 0;
+}
+
+.export-path {
+  overflow-wrap: anywhere;
+  font-size: var(--text-s);
 }
 
 .track.on {
@@ -167,14 +258,14 @@
   box-shadow: inset 3px 0 0 var(--sel);
 }
 
-.track b {
+.track-select b {
   font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.track small {
+.track-select small {
   grid-column: 2 / 4;
   color: var(--ink-2);
   font-size: var(--text-s);
@@ -183,7 +274,7 @@
   white-space: nowrap;
 }
 
-.track .count {
+.track-select .count {
   min-width: 20px;
   padding: 0 6px;
   border-radius: 99px;

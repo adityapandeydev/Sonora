@@ -1,46 +1,12 @@
 // Generate a new score from settings, and bring back kept versions. Both
 // replace the score text; the engine keeps the text being replaced.
-import { useEffect, useId, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { useEffect, useId, useState, type FormEvent } from "react";
+import { Modal } from "./ui/Modal";
 import { EngineError } from "./engine";
 import { engineProblems, initialSettings, LIMITS, lengthOf, localProblems, randomSeed, scaleLabel, type Field } from "./generate";
 import type { GenSettings, ScoreVersion } from "./protocol";
 
 const minutes = (s: number) => `${Math.floor(s / 60)}:${String(Math.round(s % 60)).padStart(2, "0")}`;
-
-/** A native modal dialog: focus is trapped, Escape closes, focus returns on close. */
-function Modal({ open, title, onClose, children, className }: { open: boolean; title: string; onClose: () => void; children: ReactNode; className?: string }) {
-  const ref = useRef<HTMLDialogElement>(null);
-  const titleId = useId();
-  useEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    if (open && !el.open) el.showModal();
-    if (!open && el.open) el.close();
-  }, [open]);
-  return (
-    <dialog
-      ref={ref}
-      className={`modal ${className ?? ""}`}
-      aria-labelledby={titleId}
-      onClose={onClose}
-      onCancel={(e) => {
-        e.preventDefault();
-        onClose();
-      }}
-      onMouseDown={(e) => {
-        // A press on the backdrop (the dialog element itself) closes it.
-        if (e.target === e.currentTarget) onClose();
-      }}
-    >
-      {open ? (
-        <div className="modal-body">
-          <h2 id={titleId}>{title}</h2>
-          {children}
-        </div>
-      ) : null}
-    </dialog>
-  );
-}
 
 interface GenerateProps {
   open: boolean;

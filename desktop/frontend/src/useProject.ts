@@ -208,6 +208,11 @@ export function useProject(ready: boolean) {
     setVolume: (volume: number) => dragCommand("transport.setVolume", { volume }),
     retryRender: () => request("render.start").then(refresh).catch(report),
     command,
+    /** A command whose failure is reported in the workspace. */
+    act: (cmd: unknown) => {
+      setError(null);
+      command(cmd).catch(report);
+    },
     cancelRender: () => request("render.cancel").then(refresh).catch(report),
     generate: (settings: GenSettings) => replace("project.generate", { settings }),
     restoreVersion: (id: number) => replace("project.restoreVersion", { id }),

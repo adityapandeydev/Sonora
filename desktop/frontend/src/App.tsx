@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { ExportDialog, useExport } from "./ExportDialog";
 import { GenerateDialog, VersionsDialog } from "./GenerateDialog";
 import { engineStatus, onEngineStatus, restartEngine, State, type Status } from "./engine";
 import { useProject } from "./useProject";
@@ -16,7 +17,8 @@ const describe: Record<string, string> = {
 export default function App() {
   const [status, setStatus] = useState<Status | null>(null);
   const [restarting, setRestarting] = useState(false);
-  const [dialog, setDialog] = useState<"generate" | "versions" | null>(null);
+  const [dialog, setDialog] = useState<"generate" | "versions" | "export" | null>(null);
+  const exporter = useExport();
 
   useEffect(() => {
     const off = onEngineStatus(setStatus);
@@ -61,6 +63,9 @@ export default function App() {
             <button type="button" className="button on-shell" onClick={() => setDialog("generate")}>
               Generate
             </button>
+            <button type="button" className="button on-shell" onClick={() => setDialog("export")} title="Save the song as a WAV file">
+              {exporter.phase.kind === "running" ? "Exporting…" : "Export"}
+            </button>
           </div>
         ) : null}
       </header>
@@ -75,6 +80,7 @@ export default function App() {
             onGenerate={session.generate}
           />
           <VersionsDialog open={dialog === "versions"} versions={project.versions} onClose={() => setDialog(null)} onRestore={session.restoreVersion} />
+          <ExportDialog open={dialog === "export"} project={project} exporter={exporter} onClose={() => setDialog(null)} />
         </>
       ) : null}
       {open ? (
@@ -96,6 +102,7 @@ export default function App() {
           onRetryRender={session.retryRender}
           onCancelRender={session.cancelRender}
           onCommand={session.command}
+          onAct={session.act}
         />
       ) : (
         <main className="message">
