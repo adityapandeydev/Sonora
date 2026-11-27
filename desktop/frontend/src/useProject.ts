@@ -175,6 +175,49 @@ export function useProject(ready: boolean) {
     [accept],
   );
 
+  // Send typing the engine has not seen yet, so a file gets what is on screen.
+  const flush = useCallback(async () => {
+    window.clearTimeout(timer.current);
+    const unsent = pending.current;
+    pending.current = null;
+    if (unsent !== null) accept(await request<ProjectView>("project.setScore", { text: unsent }));
+  }, [accept]);
+
+  // A new project, file or score: the editor takes its text.
+  const take = useCallback(
+    (v: ProjectView) => {
+      accept(v);
+      setText(v.scoreText);
+      return v;
+    },
+    [accept],
+  );
+
+  const files = {
+    save: async (path?: string) => {
+      await flush();
+      const v = await request<ProjectView>("project.save", path ? { path } : {});
+      accept(v);
+      return v;
+    },
+    open: async (path: string) => {
+      await flush();
+      return take(await request<ProjectView>("project.open", { path }));
+    },
+    create: async () => {
+      await flush();
+      return take(await request<ProjectView>("project.new"));
+    },
+    importScore: async (path: string) => {
+      await flush();
+      return take(await request<ProjectView>("score.import", { path }));
+    },
+    exportScore: async (path: string) => {
+      await flush();
+      return request<{ path: string }>("score.export", { path });
+    },
+  };
+
   // Replace the score in the engine. Typing not yet sent goes first, so the
   // engine keeps it as the version being replaced. Errors go to the caller.
   const replace = useCallback(
@@ -208,6 +251,8 @@ export function useProject(ready: boolean) {
     setVolume: (volume: number) => dragCommand("transport.setVolume", { volume }),
     retryRender: () => request("render.start").then(refresh).catch(report),
     command,
+    files,
+    report,
     /** A command whose failure is reported in the workspace. */
     act: (cmd: unknown) => {
       setError(null);

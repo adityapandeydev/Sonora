@@ -49,13 +49,15 @@ export function readFormat(saved: string | null): ExportFormat {
 }
 
 /** A file name from a song title, safe on Windows. */
-export function fileNameFor(title: string): string {
+export function fileNameFor(title: string, extension = ".wav"): string {
   const base = title.replace(/[<>:"/\\|?*\u0000-\u001f]/g, " ").replace(/\s+/g, " ").trim().replace(/[. ]+$/, "");
-  return `${base || "Song"}.wav`;
+  return `${base || "Song"}${extension}`;
 }
 
-/** Make sure a chosen path ends in .wav. */
-export const withWav = (path: string) => (/\.wav$/i.test(path) ? path : `${path}.wav`);
+/** Make sure a chosen path ends in an extension. */
+export const withExtension = (path: string, extension: string) => (path.toLowerCase().endsWith(extension.toLowerCase()) ? path : `${path}${extension}`);
+
+export const withWav = (path: string) => withExtension(path, ".wav");
 
 export function bytes(n: number): string {
   if (n < 1024 * 1024) return `${Math.max(1, Math.round(n / 1024))} KB`;

@@ -25,6 +25,8 @@ interface Props {
   onLoop: (loop: LoopRange | null) => void;
   onVolume: (volume: number) => void;
   onRetryRender: () => void;
+  /** Offered when the shown error can be put away. */
+  onDismissError?: () => void;
   onCancelRender: () => void;
   /** Send a project command; resolves once the engine has applied it. */
   onCommand: (command: unknown) => Promise<unknown>;
@@ -312,6 +314,11 @@ export function Workspace(props: Props) {
           {project.render.state === "failed" ? (
             <button type="button" className="button" onClick={props.onRetryRender}>
               Try again
+            </button>
+          ) : null}
+          {props.error && props.onDismissError ? (
+            <button type="button" className="button" onClick={props.onDismissError}>
+              Dismiss
             </button>
           ) : null}
         </div>

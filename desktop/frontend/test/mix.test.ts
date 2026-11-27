@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { baseName, bytes, decibels, DEFAULT_FORMAT, fileNameFor, GAIN, panLabel, readFormat, withWav } from "../src/mix.ts";
+import { baseName, bytes, decibels, DEFAULT_FORMAT, fileNameFor, GAIN, panLabel, readFormat, withExtension, withWav } from "../src/mix.ts";
 
 test("gain reads in decibels, pan in words", () => {
   assert.equal(decibels(1), "0.0 dB");
@@ -30,4 +30,11 @@ test("file names are safe and always .wav", () => {
   assert.equal(baseName("C:\\Users\\me\\song.wav"), "song.wav");
   assert.equal(bytes(2048), "2 KB");
   assert.equal(bytes(5 * 1024 * 1024), "5.0 MB");
+});
+
+test("project and score names get their own extensions", () => {
+  assert.equal(fileNameFor("My song", ".sonoraproj"), "My song.sonoraproj");
+  assert.equal(withExtension("C:\\x\\song", ".sonoraproj"), "C:\\x\\song.sonoraproj");
+  assert.equal(withExtension("C:\\x\\song.SonoraProj", ".sonoraproj"), "C:\\x\\song.SonoraProj");
+  assert.equal(withExtension("tune.sonora", ".sonoraproj"), "tune.sonora.sonoraproj");
 });

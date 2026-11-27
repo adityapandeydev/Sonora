@@ -1160,3 +1160,73 @@
   background: var(--tc, var(--sel));
   border-color: var(--tc, var(--sel));
 }
+
+/* File menu and name */
+.top .file-name {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  color: var(--on-shell-2);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.top .edited {
+  padding: 1px 7px;
+  border: 1px solid var(--shell-line);
+  border-radius: 99px;
+  font-size: var(--text-s);
+}
+
+.menu-wrap {
+  position: relative;
+}
+
+.menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 20;
+  min-width: 240px;
+  margin: 0;
+  padding: 4px;
+  list-style: none;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--page);
+  color: var(--ink);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 0.22);
+}
+
+.menu li.divider {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--line);
+}
+
+.menu button {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-4);
+  width: 100%;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 5px;
+  background: none;
+  text-align: left;
+  cursor: pointer;
+}
+
+.menu button:focus-visible,
+.menu button:hover {
+  outline: 0;
+  background: var(--sel-soft);
+}
+
+.menu kbd {
+  color: var(--ink-2);
+  font: inherit;
+  font-size: var(--text-s);
+}

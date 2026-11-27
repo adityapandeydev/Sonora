@@ -128,6 +128,8 @@ export interface ProjectView {
   versions: ScoreVersion[];
   /** What the generator accepts. */
   generator: { roots: string[]; scales: string[] };
+  /** Where the project lives, and whether it has unsaved changes. */
+  file: { path: string | null; name: string | null; modified: boolean };
 }
 
 /** Settings for project.generate. */

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { ExportDialog, useExport } from "./ExportDialog";
+import { FileMenu, UnsavedDialog, useFiles } from "./FileMenu";
 import { GenerateDialog, VersionsDialog } from "./GenerateDialog";
 import { engineStatus, onEngineStatus, restartEngine, State, type Status } from "./engine";
 import { useProject } from "./useProject";
@@ -40,16 +41,48 @@ export default function App() {
   };
 
   const { project, text } = session;
+  const files = useFiles(session, project);
+  const ready = state === State.StateReady && project !== null;
+
+  // File shortcuts, outside dialogs.
+  useEffect(() => {
+    if (!ready) return;
+    const keys = (e: KeyboardEvent) => {
+      if (!(e.ctrlKey || e.metaKey) || e.altKey || document.querySelector("dialog[open]")) return;
+      const k = e.key.toLowerCase();
+      const run = k === "s" ? (e.shiftKey ? files.saveAs : files.save) : !e.shiftKey && k === "o" ? files.open : !e.shiftKey && k === "n" ? files.create : null;
+      if (!run) return;
+      e.preventDefault();
+      run();
+    };
+    window.addEventListener("keydown", keys);
+    return () => window.removeEventListener("keydown", keys);
+  });
+
+  const fileName = project?.file.name ?? "Untitled";
+  // A score without a title is named by its file.
+  const songTitle = ready && project.song?.title && project.song.title !== "Untitled" ? project.song.title : null;
+  const heading = ready ? (songTitle ?? fileName) : "Sonora";
+  const edited = project?.file.modified ?? false;
+  useEffect(() => {
+    document.title = ready ? `${fileName}${edited ? " (edited)" : ""} - Sonora` : "Sonora";
+  }, [ready, fileName, edited]);
   const open = state === State.StateReady && project !== null && text !== null;
   const banner = open ? scoreState(project, text) : { tone: broken ? "bad" : "", words: describe[state] ?? state };
 
   return (
     <div className={open ? "app ready" : "app"}>
       <header className="top">
-        <h1 title={open && project.song ? project.song.title : "Sonora"}>{open && project.song ? project.song.title : "Sonora"}</h1>
+        <h1 title={heading}>{heading}</h1>
         {open && project.song ? (
           <span className="meta">
             {Math.round(project.song.bpm * 10) / 10} bpm, {project.song.timeSignature.join("/")}
+          </span>
+        ) : null}
+        {open ? (
+          <span className="file-name" title={project.file.path ?? "Not saved yet"}>
+            {heading !== fileName ? fileName : null}
+            {edited ? <span className="edited">Edited</span> : null}
           </span>
         ) : null}
         <span className={`state ${banner.tone}`} role="status">
@@ -57,6 +90,7 @@ export default function App() {
         </span>
         {open ? (
           <div className="top-actions">
+            <FileMenu files={files} />
             <button type="button" className="button on-shell" onClick={() => setDialog("versions")} disabled={project.versions.length === 0} title="Scores replaced by generating or restoring">
               Versions{project.versions.length > 0 ? ` (${project.versions.length})` : ""}
             </button>
@@ -81,6 +115,7 @@ export default function App() {
           />
           <VersionsDialog open={dialog === "versions"} versions={project.versions} onClose={() => setDialog(null)} onRestore={session.restoreVersion} />
           <ExportDialog open={dialog === "export"} project={project} exporter={exporter} onClose={() => setDialog(null)} />
+          <UnsavedDialog files={files} project={project} />
         </>
       ) : null}
       {open ? (
@@ -91,7 +126,8 @@ export default function App() {
           transport={session.transport}
           peaks={session.peaks}
           timing={session.timing}
-          error={session.error}
+          error={files.problem ?? session.error}
+          onDismissError={files.problem ? files.clearProblem : undefined}
           onEdit={session.edit}
           onPlay={session.play}
           onPause={session.pause}
