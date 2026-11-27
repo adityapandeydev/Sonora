@@ -77,6 +77,8 @@ data ErrorCode
     | InvalidValue        -- ^ A command value is out of range; data lists the fields.
     | NoRender            -- ^ Playback requested before any render has finished.
     | AudioUnavailable    -- ^ The audio output device could not be used.
+    | FileError           -- ^ A file could not be read or written; the message says what to do.
+    | InvalidProject      -- ^ A file is not a project this build can open.
     deriving (Eq, Show, Enum, Bounded)
 
 errorCodeText :: ErrorCode -> Text
@@ -97,6 +99,8 @@ errorCodeText c = case c of
     InvalidValue       -> "invalid_value"
     NoRender           -> "no_render"
     AudioUnavailable   -> "audio_unavailable"
+    FileError          -> "file_error"
+    InvalidProject     -> "invalid_project"
 
 -- | A structured failure reported to the client.
 data ServiceError = ServiceError

@@ -57,6 +57,11 @@ module Sonora.Service.Session
     , startExport
     , cancelExport
     , exportRates
+    , saveProject
+    , openProject
+    , startNewProject
+    , importScore
+    , exportScore
     , maxVersions
     , maxPeakBuckets
     , minLoopSeconds
@@ -81,6 +86,10 @@ import Sonora.Generate.Score
 import Sonora.Project.Compile
 import Sonora.Project.Layout (outline, songInfo, timing)
 import Sonora.Project.Render (Stems, emptyStems, renderProject)
+import Sonora.Project.Persistence
+import qualified Data.Text.Encoding as TE
+import System.FilePath (takeFileName)
+import System.Directory (getFileSize)
 import Sonora.Render.WAV (BitDepth (..), encodeWAV)
 import qualified Data.ByteString.Lazy as BL
 import System.Directory (doesDirectoryExist, removeFile, renameFile)
@@ -190,6 +199,8 @@ data St = St
     , stStems :: !Stems                    -- ^ Rendered tracks, reused while they apply.
     , stExport :: !(Maybe ExportJob)
     , stNextExport :: !Int
+    , stFile :: !(Maybe FilePath)          -- ^ Where the project was opened from or saved to.
+    , stSavedRevision :: !Revision         -- ^ Revision with nothing unsaved.
     }
 
 data ExportJob = ExportJob
@@ -255,6 +266,8 @@ newSession cfg = Session cfg <$> newMVar St
     , stStems = emptyStems
     , stExport = Nothing
     , stNextExport = 1
+    , stFile = Nothing
+    , stSavedRevision = Revision 0
     }
 
 -- | Stop rendering and playback and release the audio device.
@@ -298,6 +311,10 @@ projectViewLocked st = do
         , "timingVersion"  .= stValidSince st
         , "master"         .= projectMaster p
         , "versions"       .= map (versionView (projectScoreText p)) (stVersions st)
+        , "file"           .= object
+            [ "path" .= stFile st
+            , "name" .= fmap takeFileName (stFile st)
+            , "modified" .= (projectRevision p /= stSavedRevision st) ]
         , "generator"      .= object ["roots" .= rootNames, "scales" .= scaleNames]
         , "render"         .= renderView st
         , "transport"      .= transport
@@ -501,14 +518,18 @@ isInappropriate io = case ioeGetErrorType io of
 
 -- | Words for an export failure that say what to do about it.
 exportFailure :: FilePath -> SomeException -> Text
-exportFailure path e = case fromException e of
+exportFailure = writeFailure "The export failed"
+
+-- | Words for a failure to write a file that say what to do about it.
+writeFailure :: Text -> FilePath -> SomeException -> Text
+writeFailure failed path e = case fromException e of
     Just io
         | isPermissionError io -> "Sonora is not allowed to write " <> T.pack path <> ". Choose another folder, or check the file is not read-only."
         | isAlreadyInUseError io -> T.pack path <> " is open in another program. Close it there, or choose another name."
         | isFullError io -> "The disk is full. Free some space, or choose another drive."
         | isDoesNotExistError io -> "The folder for " <> T.pack path <> " no longer exists. Choose another folder."
         | isInappropriate io -> "Sonora could not write " <> T.pack path <> " (" <> plainMessage e <> "). Choose another file name."
-    _ -> "The export failed: " <> plainMessage e <> ". Try again, or choose another folder."
+    _ -> failed <> ": " <> plainMessage e <> ". Try again, or choose another folder."
 
 cancelExport :: Session -> Emit -> IO Value
 cancelExport s emit = modifyMVar (sState s) $ \st -> case stExport st of
@@ -518,6 +539,115 @@ cancelExport s emit = modifyMVar (sState s) $ \st -> case stExport st of
         _ <- try (removeFile (exportPart job)) :: IO (Either SomeException ())
         emit (Event "export.cancelled" (object ["exportId" .= exportId job]))
         return (st { stExport = Nothing }, object ["cancelled" .= True])
+
+-------------------------------------------------------------------------------
+-- Project files
+
+-- | Checks for a file about to be written.
+targetProblems :: String -> Text -> FilePath -> IO [ParamError]
+targetProblems ext kind path = do
+    dirOk <- doesDirectoryExist (takeDirectory path)
+    folder <- doesDirectoryExist path
+    return $ concat
+        [ [ ParamError "path" ("Choose a file name ending in " <> T.pack ext <> " for " <> kind) | map toLowerAscii (takeExtension path) /= ext ]
+        , [ ParamError "path" ("The folder " <> T.pack (takeDirectory path) <> " does not exist") | not dirOk ]
+        , [ ParamError "path" "There is a folder with this name; choose another file name" | folder ]
+        ]
+
+toLowerAscii :: Char -> Char
+toLowerAscii c = if c >= 'A' && c <= 'Z' then toEnum (fromEnum c + 32) else c
+
+-- | Save the whole project. Without a path, to where it was opened or last
+-- saved. A failed save leaves any existing file as it was.
+saveProject :: Session -> Maybe FilePath -> IO (Either ServiceError Value)
+saveProject s requested = modifyMVar (sState s) $ \st -> case requested `orElse` stFile st of
+    Nothing -> return (st, Left (invalidParams [ParamError "path" "Choose where to save the project"]))
+    Just path -> do
+        problems <- targetProblems projectExtension "a project" path
+        if not (null problems) then return (st, Left (invalidParams problems)) else do
+            let p = stProject st
+                file = ProjectFile p [ SavedVersion (versionLabel v) (versionText v) (versionSettings v) | v <- stVersions st ]
+            result <- try (writeAtomically path (encodeProject file))
+            case result of
+                Left e -> return (st, Left (serviceError FileError (writeFailure "Saving failed" path e)))
+                Right () -> do
+                    let st' = st { stFile = Just path, stSavedRevision = projectRevision p }
+                    v <- projectViewLocked st'
+                    return (st', Right v)
+  where
+    orElse (Just x) _ = Just x
+    orElse Nothing y = y
+
+-- | Replace the session's project with an opened file's.
+openProject :: Session -> Emit -> FilePath -> IO (Either ServiceError Value)
+openProject s emit path = do
+    loaded <- readProjectFile path
+    case loaded of
+        Left e -> return . Left $ serviceError (case e of Unreadable _ -> FileError; _ -> InvalidProject) (loadErrorMessage e)
+        Right (ProjectFile p versions) -> fmap Right . modifyMVar (sState s) $ \st -> do
+            st' <- replaceProject s emit (Just path) p versions st
+            v <- projectViewLocked st'
+            return (st', v)
+
+-- | Start again from the starter score, untitled.
+startNewProject :: Session -> Emit -> IO Value
+startNewProject s emit = modifyMVar (sState s) $ \st -> do
+    st' <- replaceProject s emit Nothing (newProject (sessionInitialScore (sConfig s))) [] st
+    v <- projectViewLocked st'
+    return (st', v)
+
+-- | Stop what belongs to the old project and take on a new one. Revisions
+-- keep counting up, so views of the new project are always newer.
+replaceProject :: Session -> Emit -> Maybe FilePath -> Project -> [SavedVersion] -> St -> IO St
+replaceProject s emit path p versions st0 = do
+    st1 <- cancelRunningLocked emit st0
+    forM_ (stAudition st1 >>= auWorker) killThread
+    forM_ (stAudio st1) $ \b -> do
+        backendSetPlaying b SongVoice False
+        backendSetPlaying b AuditionVoice False
+        backendSetLoop b SongVoice Nothing
+    let rev = nextRevision (projectRevision (stProject st1))
+        kept = zipWith (\i (SavedVersion l t g) -> ScoreVersion i l t rev g) [1 ..] (take maxVersions versions)
+        st2 = st1
+            { stProject = p { projectRevision = rev }
+            , stFinished = Nothing, stFailure = Nothing, stLoaded = Nothing
+            , stCue = 0, stLoop = Nothing
+            , stStems = emptyStems
+            , stAudition = Nothing
+            , stVersions = kept, stNextVersion = length kept + 1
+            , stFile = path, stSavedRevision = rev
+            , stValidSince = rev
+            }
+    st3 <- startRenderLocked s emit False st2
+    v <- transportViewLocked st3
+    emit (Event "transport" v)
+    return st3
+
+-- | Read a .sonora score into the project, keeping the score it replaces.
+importScore :: Session -> Emit -> FilePath -> IO (Either ServiceError Value)
+importScore s emit path = do
+    result <- try $ do
+        size <- getFileSize path
+        if size > 4 * 1024 * 1024 then return Nothing else Just <$> BL.readFile path
+    case result of
+        Left (e :: SomeException) -> return (Left (serviceError FileError ("The score could not be read: " <> plainMessage e)))
+        Right Nothing -> return (Left (serviceError FileError "The file is too large to be a score."))
+        Right (Just bytes) -> case TE.decodeUtf8' (BL.toStrict bytes) of
+            Left _ -> return (Left (serviceError FileError "The file is not a text score (it is not UTF-8 text)."))
+            Right txt -> do
+                let clean = maybe txt id (T.stripPrefix "\xFEFF" txt)
+                replaceScore s emit clean $ \st -> const (keepCurrent ("Before importing " <> T.pack (takeFileName path)) st)
+
+-- | Write the score text, exactly as edited, to a .sonora file.
+exportScore :: Session -> FilePath -> IO (Either ServiceError Value)
+exportScore s path = do
+    problems <- targetProblems scoreExtension "a score" path
+    if not (null problems) then return (Left (invalidParams problems)) else do
+        txt <- withMVar (sState s) (return . projectScoreText . stProject)
+        result <- try (writeAtomically path (BL.fromStrict (TE.encodeUtf8 txt)))
+        return $ case result of
+            Left e -> Left (serviceError FileError (writeFailure "Saving the score failed" path e))
+            Right () -> Right (object ["path" .= path])
 
 -------------------------------------------------------------------------------
 -- Audition

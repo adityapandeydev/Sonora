@@ -74,6 +74,8 @@ library
         Sonora.Project.Render
         Sonora.Project.Layout
         Sonora.Project.Mix
+        Sonora.Project.Migration
+        Sonora.Project.Persistence
         Sonora.Audio.Backend
         Sonora.Audio.Mixer
         Sonora.Audio.Audition
@@ -157,6 +159,7 @@ test-suite sonora-test
         GenerateSpec
         AuditionSpec
         MixSpec
+        PersistenceSpec
     build-tool-depends:
         sonora:sonora-service
     build-depends:

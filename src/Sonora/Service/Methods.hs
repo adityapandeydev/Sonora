@@ -52,6 +52,15 @@ import Sonora.Synth.Patch (Patch)
 --   16, 24 or 32-bit float; defaults 44100 and 24). The file appears only
 --   when complete. Errors: @invalid_value@ (with @params@), @no_render@.
 -- * @export.cancel@ → @{cancelled}@.
+-- * @project.save@ @{path?}@ → project view; writes the whole project (score,
+--   sounds, mix, versions) to a .sonoraproj file, by default where it was
+--   opened or last saved. Errors: @invalid_value@, @file_error@.
+-- * @project.open@ @{path}@, @project.new@ → project view; replace the
+--   project. Errors: @file_error@, @invalid_project@ (a damaged file, or one
+--   from a newer Sonora); nothing changes on error.
+-- * @score.import@ @{path}@ → project view; reads a .sonora score, keeping
+--   the score it replaces as a version. @score.export@ @{path}@ → @{path}@;
+--   writes the score text alone.
 --
 -- Events: @render.started@, @render.progress@, @render.finished@,
 -- @render.failed@, @render.cancelled@ (all carry @jobId@ and @revision@),
@@ -92,6 +101,11 @@ applicationMethods s = Map.fromList
     , ("export.start", \ctx params -> withParams (\o -> ExportRequest <$> o .: "path" <*> o .:? "sampleRate" .!= 44100 <*> o .:? "bitDepth" .!= 24) params
         (startExport s (contextEmit ctx)))
     , ("export.cancel", \ctx _ -> Right <$> cancelExport s (contextEmit ctx))
+    , ("project.save", \_ params -> withParams (.:? "path") params (saveProject s))
+    , ("project.open", \ctx params -> withParams (.: "path") params (openProject s (contextEmit ctx)))
+    , ("project.new", \ctx _ -> Right <$> startNewProject s (contextEmit ctx))
+    , ("score.import", \ctx params -> withParams (.: "path") params (importScore s (contextEmit ctx)))
+    , ("score.export", \_ params -> withParams (.: "path") params (exportScore s))
     ]
 
 startParams :: Object -> Parser (Patch, Int, Double)
@@ -117,7 +131,8 @@ serialMethods = Set.fromList
     , "transport.seek", "transport.setLoop", "transport.setVolume"
     , "project.generate", "project.restoreVersion"
     , "audition.start", "audition.update", "audition.release", "audition.stop"
-    , "export.start", "export.cancel" ]
+    , "export.start", "export.cancel"
+    , "project.save", "project.open", "project.new", "score.import", "score.export" ]
 
 -- | Methods for exercising the protocol from tests and host integration
 -- checks. Only served when the service is started with

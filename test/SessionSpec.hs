@@ -25,6 +25,8 @@ import Sonora.Project.Compile
 import Sonora.Project.Render (Stems, renderCompiled, renderProject)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
+import qualified Data.ByteString.Lazy as BL
+import Data.Text.Encoding (encodeUtf8)
 import Data.Word (Word32)
 import GHC.Float (castWord32ToFloat)
 import System.Directory (createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getTemporaryDirectory, listDirectory, removeDirectoryRecursive)
@@ -175,6 +177,26 @@ jobIds n = mapMaybe (num ["jobId"]) . named n
 
 lengthOf :: Value -> Maybe Double
 lengthOf v = fmap (* 1000) (num ["seconds"] v)
+
+-- | Run with a harness and return a value.
+withHarnessV :: Fakes -> (Harness -> IO a) -> IO a
+withHarnessV f act = do
+    ref <- newIORef Nothing
+    _ <- withHarness f (\h -> act h >>= writeIORef ref . Just >> return True)
+    maybe (fail "harness failed") return =<< readIORef ref
+
+scoreThree :: Text
+scoreThree = "track lead (lead):\n    C4 quarter\ntrack bass (bass):\n    C2 half\n"
+
+trackIdNamed :: Text -> Value -> TrackId
+trackIdNamed name v = case [ TrackId i | Just ts <- [arr ["tracks"] v], t <- ts, str ["name"] t == Just name, Just i <- [str ["id"] t] ] of
+    (i : _) -> i
+    [] -> error "no such track"
+
+arr :: [Text] -> Value -> Maybe [Value]
+arr ks v = case path ks v of
+    Just (Array a) -> Just (foldr (:) [] a)
+    _ -> Nothing
 
 -- | Wait until the event log satisfies a condition (at most 3 s).
 waitUntil :: Harness -> ([Event] -> Bool) -> IO Bool
@@ -666,6 +688,84 @@ scenarios =
         w <- readWav out
         let expected = concat [ [realToFrac l, realToFrac r] | Frame l r <- V.toList playing ] :: [Float]
         return (V.length playing > 1000 && maybe False ((== expected) . floats . wavData) w))
+
+    , ("A saved project reopens as it was, in a new session", do
+        dir <- scratchDir "save"
+        let file = dir </> "song.sonoraproj"
+        (saved, untitled, afterSave, edited) <- withHarnessV fakes $ \h -> do
+            let s = hSession h
+            _ <- setScore s (hEmit h) scoreThree
+            v0 <- projectView s
+            let lead = trackIdNamed "lead" v0
+            Right _ <- applyProjectCommand s (hEmit h) (UpdateTrackMix lead noMixUpdate { updateGain = Just 0.5, updateSolo = Just True })
+            Right _ <- generate s (hEmit h) (GenSettings 3 "A" "dorian" 90 2)
+            Right _ <- restoreVersion s (hEmit h) 1
+            before <- projectView s
+            r <- saveProject s (Just file)
+            v1 <- either (const (return Null)) return r
+            _ <- setScore s (hEmit h) (scoreThree <> "\n")
+            v2 <- projectView s
+            return (before, path ["file", "modified"] before, path ["file", "modified"] v1, path ["file", "modified"] v2)
+        withHarness fakes $ \h -> do
+            r <- openProject (hSession h) (hEmit h) file
+            ok <- waitUntil h (finishedCount 1)
+            let opened = either (const Null) id r
+                same k = path [k] opened == path [k] saved
+            return (ok && all same ["scoreText", "tracks", "master", "song"]
+                    && fmap (map (str ["label"])) (arr ["versions"] opened) == fmap (map (str ["label"])) (arr ["versions"] saved)
+                    && str ["file", "name"] opened == Just "song.sonoraproj"
+                    && path ["file", "modified"] opened == Just (Bool False)
+                    && untitled == Just (Bool True) && afterSave == Just (Bool False) && edited == Just (Bool True)
+                    && num ["revision"] opened > Just 0))
+
+    , ("Opening a damaged or newer file changes nothing", withHarness fakes $ \h -> do
+        dir <- scratchDir "bad"
+        let s = hSession h
+        BL.writeFile (dir </> "newer.sonoraproj") "{\"format\":\"sonora-project\",\"version\":99}"
+        BL.writeFile (dir </> "junk.sonoraproj") "not a project"
+        before <- projectView s
+        r1 <- openProject s (hEmit h) (dir </> "newer.sonoraproj")
+        r2 <- openProject s (hEmit h) (dir </> "junk.sonoraproj")
+        r3 <- openProject s (hEmit h) (dir </> "missing.sonoraproj")
+        after <- projectView s
+        return (code r1 == InvalidProject && either (T.isInfixOf "newer version" . errorMessage) (const False) r1
+                && code r2 == InvalidProject && code r3 == FileError
+                && path ["revision"] after == path ["revision"] before && path ["scoreText"] after == path ["scoreText"] before))
+
+    , ("Saving checks the target and needs a path the first time", withHarness fakes $ \h -> do
+        dir <- scratchDir "target"
+        let s = hSession h
+        r1 <- saveProject s Nothing
+        r2 <- saveProject s (Just (dir </> "song.txt"))
+        createDirectoryIfMissing True (dir </> "taken.sonoraproj")
+        r3 <- saveProject s (Just (dir </> "taken.sonoraproj"))
+        files <- listDirectory dir
+        return (code r1 == InvalidValue && code r2 == InvalidValue && code r3 == InvalidValue && files == ["taken.sonoraproj"]))
+
+    , ("Scores import and export as plain text, separate from projects", withHarness fakes $ \h -> do
+        dir <- scratchDir "score"
+        let s = hSession h
+            out = dir </> "mine.sonora"
+        _ <- setScore s (hEmit h) scoreB
+        Right _ <- exportScore s out
+        written <- BS.readFile out
+        BS.writeFile (dir </> "theirs.sonora") ("\xEF\xBB\xBF" <> encodeUtf8 scoreC)
+        r <- importScore s (hEmit h) (dir </> "theirs.sonora")
+        BS.writeFile (dir </> "binary.sonora") (BS.pack [0xff, 0xfe, 0x00, 0xd8])
+        bad <- importScore s (hEmit h) (dir </> "binary.sonora")
+        notScore <- exportScore s (dir </> "mine.wav")
+        let v = either (const Null) id r
+        return (written == encodeUtf8 scoreB
+                && str ["scoreText"] v == Just scoreC
+                && fmap (take 1 . map (str ["label"])) (arr ["versions"] v) == Just [Just "Before importing theirs.sonora"]
+                && code bad == FileError && code notScore == InvalidValue))
+
+    , ("New starts from the starter score, untitled", withHarness fakes $ \h -> do
+        let s = hSession h
+        _ <- setScore s (hEmit h) scoreB
+        v <- startNewProject s (hEmit h)
+        return (str ["scoreText"] v == Just scoreA && path ["file", "path"] v == Just Null
+                && path ["file", "modified"] v == Just (Bool False) && arr ["versions"] v == Just []))
 
     , ("Every state-changing method is serial", withHarness fakes $ \h ->
         return (Map.keysSet (applicationMethods (hSession h)) == Set.insert "project.timing" (Set.insert "render.peaks" serialMethods)))
