@@ -122,6 +122,7 @@ export default function App() {
   return (
     <div className={open ? "app ready" : "app"}>
       <header className="top">
+        <img className="brand" src="/sonora.svg" alt="" width="22" height="22" />
         <h1 title={heading}>{heading}</h1>
         {open && project.song ? (
           <span className="meta">

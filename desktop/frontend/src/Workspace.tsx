@@ -54,6 +54,7 @@ function renderStatus(project: ProjectView, progress: RenderProgress | null): st
 
 export function scoreState(project: ProjectView, text: string): { tone: "good" | "bad" | ""; words: string } {
   if (project.scoreText !== text) return { tone: "", words: "Checking the score" };
+  if (project.scoreIsCurrent && project.tracks.length === 0) return { tone: "", words: "No tracks yet. Add one with: track name (instrument):" };
   if (project.scoreIsCurrent) return { tone: "good", words: "Score is valid" };
   const n = project.diagnostics.filter((d) => d.severity === "error").length;
   return { tone: "bad", words: `${n} problem${n === 1 ? "" : "s"}. Playing the last valid version` };
@@ -187,7 +188,8 @@ export function Workspace(props: Props) {
     if (t && t.id !== selected?.id) setSelectedId(t.id);
   };
 
-  const canPlay = project.render.latest !== null;
+  // A render with no sound (an empty score) is nothing to play.
+  const canPlay = project.render.latest !== null && project.render.latest.durationSeconds > 0 && tracks.length > 0;
   const onCommand = props.onCommand;
   const applySound = useCallback((t: { id: string }, patch: Patch) => onCommand({ type: "setTrackPatch", track: t.id, patch }), [onCommand]);
   const resetSound = useCallback((t: { id: string }) => onCommand({ type: "resetTrackPatch", track: t.id }), [onCommand]);

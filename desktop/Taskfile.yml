@@ -3,7 +3,7 @@ version: '3'
 # Windows is the only verified platform. Run tasks with `wails3 task <name>`.
 
 vars:
-  APP_NAME: "desktop"
+  APP_NAME: "Sonora"
   BIN_DIR: "bin"
   PACKAGE_MANAGER: "npm"
   VITE_PORT: '{{.WAILS_VITE_PORT | default 9245}}'
@@ -26,10 +26,20 @@ tasks:
       - task: engine
       - task: windows:build
 
-  package:
-    summary: Packages a production build
+  notices:
+    summary: Writes the licences of everything Sonora ships to bin/THIRD_PARTY_NOTICES.txt
     cmds:
-      - task: windows:package
+      - go run ./build/notices -plan ../dist-newstyle/cache/plan.json -exe "{{.BIN_DIR}}/{{.APP_NAME}}.exe" -frontend frontend -out "{{.BIN_DIR}}/THIRD_PARTY_NOTICES.txt"
+
+  package:
+    summary: Builds everything and writes the Windows installer, bin/Sonora-amd64-installer.exe (per-user by default; INSTALL_SCOPE=machine for all users)
+    cmds:
+      - task: engine
+      - task: windows:build
+      - task: notices
+      - task: windows:create:nsis:installer
+        vars:
+          INSTALL_SCOPE: '{{.INSTALL_SCOPE | default "user"}}'
 
   run:
     summary: Runs the built application

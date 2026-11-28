@@ -92,6 +92,9 @@ Section
     SetOutPath $INSTDIR
     
     !insertmacro wails.files
+    ; The engine runs next to the host; the notices list third-party licences.
+    File "/oname=sonora-service.exe" "..\..\..\bin\sonora-service.exe"
+    File "/oname=THIRD_PARTY_NOTICES.txt" "..\..\..\bin\THIRD_PARTY_NOTICES.txt"
 
     CreateShortcut "$SMPROGRAMS\${INFO_PRODUCTNAME}.lnk" "$INSTDIR\${PRODUCT_EXECUTABLE}"
     CreateShortCut "$DESKTOP\${INFO_PRODUCTNAME}.lnk" "$INSTDIR\${PRODUCT_EXECUTABLE}"

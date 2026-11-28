@@ -55,17 +55,19 @@ export function useProject(ready: boolean) {
       setTiming(null);
       return;
     }
-    const load = request<ProjectView>("project.get");
-    load
+    // Reads are not cancelled (a cancelled engine call can still fail later,
+    // unhandled); answers for an effect that has ended are ignored instead.
+    let live = true;
+    request<ProjectView>("project.get")
       .then((v) => {
+        if (!live) return;
         accept(v);
         setText(v.scoreText);
-        return request("render.start");
+        return request("render.start").then(refresh);
       })
-      .then(refresh)
-      .catch(report);
+      .catch((e) => live && report(e));
     return () => {
-      load.cancel();
+      live = false;
     };
   }, [ready, accept, refresh, report]);
 
@@ -117,10 +119,12 @@ export function useProject(ready: boolean) {
   const latestJob = project?.render.latest?.jobId ?? null;
   useEffect(() => {
     if (latestJob === null) return;
-    const load = request<RenderPeaks>("render.peaks", { buckets: PEAK_BUCKETS });
-    load.then(setPeaks).catch(report);
+    let live = true;
+    request<RenderPeaks>("render.peaks", { buckets: PEAK_BUCKETS })
+      .then((p) => live && setPeaks(p))
+      .catch((e) => live && report(e));
     return () => {
-      load.cancel();
+      live = false;
     };
   }, [latestJob, report]);
 
@@ -128,10 +132,12 @@ export function useProject(ready: boolean) {
   const timingVersion = project?.timingVersion ?? null;
   useEffect(() => {
     if (timingVersion === null) return;
-    const load = request<ScoreTiming>("project.timing");
-    load.then(setTiming).catch(report);
+    let live = true;
+    request<ScoreTiming>("project.timing")
+      .then((t) => live && setTiming(t))
+      .catch((e) => live && report(e));
     return () => {
-      load.cancel();
+      live = false;
     };
   }, [timingVersion, report]);
 

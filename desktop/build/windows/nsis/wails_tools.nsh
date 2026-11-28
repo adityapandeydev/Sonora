@@ -5,7 +5,7 @@
 !include "FileFunc.nsh"
 
 !ifndef INFO_PROJECTNAME
-    !define INFO_PROJECTNAME "desktop"
+    !define INFO_PROJECTNAME "Sonora"
 !endif
 !ifndef INFO_COMPANYNAME
     !define INFO_COMPANYNAME "Sonora"

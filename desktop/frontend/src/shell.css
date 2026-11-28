@@ -835,17 +835,25 @@
   color: var(--on-shell-2);
 }
 
-@media (hover: hover) {
-  .button.on-shell:hover:not(:disabled) {
-    border-color: var(--on-shell-2);
-  }
-}
-
 .button.accent {
   border-color: var(--sel);
   background: var(--sel);
   color: var(--on-sel);
   font-weight: 600;
+}
+
+/* Hover must keep each button's own colours: the general hover background
+   is for plain buttons only. */
+@media (hover: hover) {
+  .button.on-shell:hover:not(:disabled) {
+    border-color: var(--on-shell-2);
+    background: color-mix(in srgb, var(--shell-2) 88%, var(--on-shell));
+  }
+
+  .button.accent:hover:not(:disabled) {
+    border-color: color-mix(in srgb, var(--sel) 86%, var(--ink));
+    background: color-mix(in srgb, var(--sel) 86%, var(--ink));
+  }
 }
 
 .button.small {
@@ -1229,4 +1237,11 @@
   color: var(--ink-2);
   font: inherit;
   font-size: var(--text-s);
+}
+
+.top .brand {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  margin-right: calc(var(--space-2) - var(--space-4));
 }
