@@ -38,6 +38,10 @@ import Sonora.Service.Methods (applicationMethods, serialMethods)
 import Sonora.Service.Protocol
 import Sonora.Service.Session
 import Sonora.Generate.Score (GenSettings (..))
+import Sonora.Project.Recovery (Found (..), RecoveryInfo (..), findAutosave)
+import Sonora.Project.Persistence (ProjectFile (..))
+import Sonora.Project.Types (ValidScore (..), Project (..))
+import Data.List (isPrefixOf)
 import Sonora.Audio.Audition (AuditionNote (..), holdSeconds)
 import Sonora.Synth.Patch (Patch (..), defaultPatch, lookupPresetPatch)
 import Sonora.Synth.Voice (VoiceConfig (..))
@@ -61,10 +65,11 @@ data Fakes = Fakes
     , audioFails    :: Bool
     , auditionDelayMs :: Int
     , realRenderAt  :: Maybe Int  -- ^ Render for real at this sample rate.
+    , recoveryIn    :: Maybe FilePath  -- ^ Autosave here, every 30 ms.
     }
 
 fakes :: Fakes
-fakes = Fakes 0 False False 0 Nothing
+fakes = Fakes 0 False False 0 Nothing Nothing
 
 -- | A fresh, empty folder for files a test writes.
 scratchDir :: String -> IO FilePath
@@ -140,6 +145,8 @@ withHarness f act = do
             , sessionInitialScore    = scoreA
             , sessionTelemetryMicros = 20000
             , sessionAuditionRenderer = fakeAudition f notes
+            , sessionRecoveryDir     = recoveryIn f
+            , sessionAutosaveMicros  = 30000
             }
     s <- newSession cfg
     let emit e = atomicModifyIORef' eventLog (\es -> (e : es, ()))
@@ -766,6 +773,102 @@ scenarios =
         v <- startNewProject s (hEmit h)
         return (str ["scoreText"] v == Just scoreA && path ["file", "path"] v == Just Null
                 && path ["file", "modified"] v == Just (Bool False) && arr ["versions"] v == Just []))
+
+    , ("Undo and redo step through score, sound and mix changes", withHarness fakes $ \h -> do
+        let s = hSession h
+        _ <- setScore s (hEmit h) scoreThree
+        v0 <- projectView s
+        let lead = trackIdNamed "lead" v0
+            bass = trackIdNamed "bass" v0
+        Right _ <- applyProjectCommand s (hEmit h) (SetTrackPatch lead (fromJust (lookupPresetPatch "chime")))
+        Right _ <- applyProjectCommand s (hEmit h) (UpdateTrackMix bass noMixUpdate { updateMute = Just True })
+        top <- projectView s
+        u1 <- undoChange s (hEmit h)
+        u2 <- undoChange s (hEmit h)
+        u3 <- undoChange s (hEmit h)
+        u4 <- undoChange s (hEmit h)   -- the starter score was never an edit
+        r1 <- redoChange s (hEmit h)
+        let label k v = str ["history", k] v
+            muted v = [ path ["mix", "mute"] t | Just ts <- [arr ["tracks"] v], t <- ts, str ["name"] t == Just "bass" ]
+            overridden v = [ path ["hasPatchOverride"] t | Just ts <- [arr ["tracks"] v], t <- ts, str ["name"] t == Just "lead" ]
+            revs = mapMaybe (num ["revision"]) [top, u1, u2, u3, r1]
+        return (label "undo" top == Just "muting bass"
+                && muted u1 == [Just (Bool False)] && overridden u1 == [Just (Bool True)] && label "undo" u1 == Just "sound change on lead"
+                && overridden u2 == [Just (Bool False)] && label "undo" u2 == Just "typing"
+                && str ["scoreText"] u3 == Just scoreA && path ["history", "undo"] u3 == Just Null
+                && num ["revision"] u4 == num ["revision"] u3
+                && str ["scoreText"] r1 == Just scoreThree && label "redo" r1 == Just "sound change on lead"
+                && and (zipWith (<) revs (drop 1 revs))))
+
+    , ("Unsaved work is autosaved, raw text and last valid score both", do
+        dir <- scratchDir "autosave"
+        withHarness fakes { recoveryIn = Just dir } $ \h -> do
+            let s = hSession h
+            _ <- setScore s (hEmit h) scoreB
+            _ <- setScore s (hEmit h) invalidScore
+            threadDelay 200000
+            found <- findAutosave dir
+            return $ case found of
+                Recoverable info (ProjectFile p _) -> projectScoreText p == invalidScore
+                    && fmap validText (projectValidScore p) == Just scoreB && recoveryFile info == Nothing
+                _ -> False)
+
+    , ("After a crash the work is offered, restored, and still unsaved", do
+        dir <- scratchDir "crash"
+        _ <- withHarness fakes { recoveryIn = Just dir } $ \h -> do
+            _ <- setScore (hSession h) (hEmit h) invalidScore
+            threadDelay 200000
+            return True                 -- the session ends without saving
+        withHarness fakes { recoveryIn = Just dir } $ \h -> do
+            let s = hSession h
+            -- Nothing written before the decision may replace the crashed work.
+            _ <- setScore s (hEmit h) scoreC
+            threadDelay 150000
+            still <- (\f -> case f of { Recoverable _ (ProjectFile p _) -> projectScoreText p == invalidScore; _ -> False }) <$> findAutosave dir
+            c <- checkRecovery s
+            Right v <- restoreRecovery s (hEmit h)
+            again <- checkRecovery s
+            return (still && path ["available"] c == Just (Bool True) && str ["savedAt"] c /= Nothing
+                    && str ["scoreText"] v == Just invalidScore && path ["file", "modified"] v == Just (Bool True)
+                    && path ["available"] again == Just (Bool False)))
+
+    , ("Saving or discarding removes the autosave; closing keeps unsaved work", do
+        dir <- scratchDir "lifecycle"
+        let file = dir </> "song.sonoraproj"
+        ok1 <- withHarness fakes { recoveryIn = Just dir } $ \h -> do
+            let s = hSession h
+            _ <- setScore s (hEmit h) scoreB
+            threadDelay 150000
+            written <- (/= NoAutosave) <$> findAutosave dir
+            Right _ <- saveProject s (Just file)
+            threadDelay 150000
+            afterSave <- (== NoAutosave) <$> findAutosave dir
+            _ <- setScore s (hEmit h) scoreC
+            _ <- discardRecovery s
+            threadDelay 150000
+            afterDiscard <- (== NoAutosave) <$> findAutosave dir
+            _ <- setScore s (hEmit h) scoreB    -- unsaved again, then the app closes
+            return (written && afterSave && afterDiscard)
+        kept <- findAutosave dir
+        return $ ok1 && case kept of
+            Recoverable info (ProjectFile p _) -> projectScoreText p == scoreB && recoveryFile info == Just file
+            _ -> False)
+
+    , ("A damaged autosave is set aside and reported, not deleted or offered again", do
+        dir <- scratchDir "damaged"
+        createDirectoryIfMissing True dir
+        BS.writeFile (dir </> "autosave.sonoraproj") "{ not json"
+        withHarness fakes { recoveryIn = Just dir } $ \h -> do
+            let s = hSession h
+            c <- checkRecovery s
+            files <- listDirectory dir
+            again <- checkRecovery s
+            r <- restoreRecovery s (hEmit h)
+            return (path ["available"] c == Just (Bool False)
+                    && maybe False (T.isInfixOf "could not be read") (str ["problem"] c)
+                    && any ("damaged-autosave-" `isPrefixOf`) files && "autosave.sonoraproj" `notElem` files
+                    && path ["available"] again == Just (Bool False) && path ["problem"] again == Nothing
+                    && code r == InvalidValue))
 
     , ("Every state-changing method is serial", withHarness fakes $ \h ->
         return (Map.keysSet (applicationMethods (hSession h)) == Set.insert "project.timing" (Set.insert "render.peaks" serialMethods)))

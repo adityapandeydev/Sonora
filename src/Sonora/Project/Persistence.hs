@@ -23,6 +23,8 @@ module Sonora.Project.Persistence
     , loadErrorMessage
     , encodeProject
     , decodeProject
+    , projectValue
+    , decodeProjectValue
     , readProjectFile
     , writeAtomically
     , maxProjectBytes
@@ -98,7 +100,10 @@ showT = T.pack . show
 -- Writing
 
 encodeProject :: ProjectFile -> BL.ByteString
-encodeProject (ProjectFile p versions) = encode $ object
+encodeProject = encode . projectValue
+
+projectValue :: ProjectFile -> Value
+projectValue (ProjectFile p versions) = object
     [ "format"    .= ("sonora-project" :: Text)
     , "version"   .= currentVersion
     , "score"     .= object
@@ -148,8 +153,10 @@ ioMessage e
     | otherwise = T.pack (show e)
 
 decodeProject :: BL.ByteString -> Either LoadError ProjectFile
-decodeProject bytes = do
-    v <- either (Left . NotJson . T.pack) Right (eitherDecode bytes)
+decodeProject bytes = either (Left . NotJson . T.pack) decodeProjectValue (eitherDecode bytes)
+
+decodeProjectValue :: Value -> Either LoadError ProjectFile
+decodeProjectValue v = do
     (format, version) <- either (const (Left NotAProject)) Right (parseEither header v)
     unless (format == ("sonora-project" :: Text)) (Left NotAProject)
     current <- case migrate version v of

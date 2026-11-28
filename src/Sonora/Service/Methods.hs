@@ -61,6 +61,13 @@ import Sonora.Synth.Patch (Patch)
 -- * @score.import@ @{path}@ → project view; reads a .sonora score, keeping
 --   the score it replaces as a version. @score.export@ @{path}@ → @{path}@;
 --   writes the score text alone.
+-- * @history.undo@, @history.redo@ → project view; step through changes.
+--   Quick runs of the same change (typing, nudging one control) are one step.
+--   The view's @history@ names the next step each way.
+-- * @recovery.check@ → @{available, file?, name?, savedAt?, title?, problem?}@:
+--   unsaved work from a session that ended without saving.
+--   @recovery.restore@ → project view; @recovery.discard@ → @{discarded}@ (also
+--   drops the current unsaved changes, for closing without saving).
 --
 -- Events: @render.started@, @render.progress@, @render.finished@,
 -- @render.failed@, @render.cancelled@ (all carry @jobId@ and @revision@),
@@ -106,6 +113,11 @@ applicationMethods s = Map.fromList
     , ("project.new", \ctx _ -> Right <$> startNewProject s (contextEmit ctx))
     , ("score.import", \ctx params -> withParams (.: "path") params (importScore s (contextEmit ctx)))
     , ("score.export", \_ params -> withParams (.: "path") params (exportScore s))
+    , ("history.undo", \ctx _ -> Right <$> undoChange s (contextEmit ctx))
+    , ("history.redo", \ctx _ -> Right <$> redoChange s (contextEmit ctx))
+    , ("recovery.check", \_ _ -> Right <$> checkRecovery s)
+    , ("recovery.restore", \ctx _ -> restoreRecovery s (contextEmit ctx))
+    , ("recovery.discard", \_ _ -> Right <$> discardRecovery s)
     ]
 
 startParams :: Object -> Parser (Patch, Int, Double)
@@ -132,7 +144,8 @@ serialMethods = Set.fromList
     , "project.generate", "project.restoreVersion"
     , "audition.start", "audition.update", "audition.release", "audition.stop"
     , "export.start", "export.cancel"
-    , "project.save", "project.open", "project.new", "score.import", "score.export" ]
+    , "project.save", "project.open", "project.new", "score.import", "score.export"
+    , "history.undo", "history.redo", "recovery.check", "recovery.restore", "recovery.discard" ]
 
 -- | Methods for exercising the protocol from tests and host integration
 -- checks. Only served when the service is started with

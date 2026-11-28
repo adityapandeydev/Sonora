@@ -62,6 +62,12 @@ module Sonora.Service.Session
     , startNewProject
     , importScore
     , exportScore
+    , undoChange
+    , redoChange
+    , checkRecovery
+    , restoreRecovery
+    , discardRecovery
+    , autosaveNow
     , maxVersions
     , maxPeakBuckets
     , minLoopSeconds
@@ -69,7 +75,7 @@ module Sonora.Service.Session
 
 import Control.Concurrent
 import Control.Exception
-import Control.Monad (forM_, void, when)
+import Control.Monad (forM_, forever, void, when)
 import Data.Aeson
 import Data.Maybe (isJust)
 import Data.Text (Text)
@@ -82,11 +88,14 @@ import Sonora.Audio.Audition
 import Sonora.Audio.Backend
 import Sonora.Audio.Device (openDeviceBackend)
 import Sonora.DSL.Print (printSong)
+import Sonora.DSL.AST (ASTSong (..))
 import Sonora.Generate.Score
 import Sonora.Project.Compile
 import Sonora.Project.Layout (outline, songInfo, timing)
 import Sonora.Project.Render (Stems, emptyStems, renderProject)
 import Sonora.Project.Persistence
+import Sonora.Project.History
+import Sonora.Project.Recovery
 import qualified Data.Text.Encoding as TE
 import System.FilePath (takeFileName)
 import System.Directory (getFileSize)
@@ -116,6 +125,10 @@ data SessionConfig = SessionConfig
     , sessionTelemetryMicros :: !Int
       -- | Renders one auditioned note.
     , sessionAuditionRenderer :: Int -> Patch -> AuditionNote -> IO (V.Vector Frame)
+      -- | Where unsaved work is kept between saves; no autosave without one.
+    , sessionRecoveryDir :: !(Maybe FilePath)
+      -- | How often unsaved work is written, in microseconds.
+    , sessionAutosaveMicros :: !Int
     }
 
 defaultSessionConfig :: SessionConfig
@@ -126,6 +139,8 @@ defaultSessionConfig = SessionConfig
     , sessionInitialScore    = starterScore
     , sessionTelemetryMicros = 40000
     , sessionAuditionRenderer = \sr p n -> evaluate (renderAudition sr p n)
+    , sessionRecoveryDir = Nothing
+    , sessionAutosaveMicros = 2000000
     }
 
 -- | The score a new session starts with.
@@ -201,6 +216,10 @@ data St = St
     , stNextExport :: !Int
     , stFile :: !(Maybe FilePath)          -- ^ Where the project was opened from or saved to.
     , stSavedRevision :: !Revision         -- ^ Revision with nothing unsaved.
+    , stHistory :: !History
+    , stAutosaved :: !(Maybe Revision)     -- ^ Revision in the autosave, if one is written.
+    , stRecoveryPending :: !Bool           -- ^ An autosave from before awaits a decision.
+    , stAutosaver :: !(Maybe ThreadId)
     }
 
 data ExportJob = ExportJob
@@ -245,7 +264,13 @@ data Session = Session
     }
 
 newSession :: SessionConfig -> IO Session
-newSession cfg = Session cfg <$> newMVar St
+newSession cfg = do
+    s <- newSessionState cfg
+    startAutosaver s
+    return s
+
+newSessionState :: SessionConfig -> IO Session
+newSessionState cfg = Session cfg <$> newMVar St
     { stProject  = newProject (sessionInitialScore cfg)
     , stNextJob  = 1
     , stRunning  = Nothing
@@ -268,15 +293,22 @@ newSession cfg = Session cfg <$> newMVar St
     , stNextExport = 1
     , stFile = Nothing
     , stSavedRevision = Revision 0
+    , stHistory = emptyHistory
+    , stAutosaved = Nothing
+    , stRecoveryPending = False
+    , stAutosaver = Nothing
     }
 
 -- | Stop rendering and playback and release the audio device.
 closeSession :: Session -> IO ()
-closeSession s = modifyMVar_ (sState s) $ \st -> do
+closeSession s = do
+  _ <- try (autosaveNow s) :: IO (Either SomeException ())
+  modifyMVar_ (sState s) $ \st -> do
     forM_ (stRunning st) (killThread . jobThread)
     forM_ (stWatcher st) killThread
     forM_ (stAudition st >>= auWorker) killThread
     forM_ (stExport st) (killThread . exportThread)
+    forM_ (stAutosaver st) killThread
     forM_ (stAudio st) backendClose
     return st { stRunning = Nothing, stWatcher = Nothing, stAudio = Nothing, stLoaded = Nothing, stAudition = Nothing }
 
@@ -311,6 +343,7 @@ projectViewLocked st = do
         , "timingVersion"  .= stValidSince st
         , "master"         .= projectMaster p
         , "versions"       .= map (versionView (projectScoreText p)) (stVersions st)
+        , "history"        .= object ["undo" .= undoLabel (stHistory st), "redo" .= redoLabel (stHistory st)]
         , "file"           .= object
             [ "path" .= stFile st
             , "name" .= fmap takeFileName (stFile st)
@@ -371,15 +404,57 @@ applyProjectCommand s emit cmd = modifyMVar (sState s) $ \st ->
 
 -- | Apply a command and start a render when the playable song changed.
 applyLocked :: Session -> Emit -> Command -> St -> IO (Either ServiceError St)
-applyLocked s emit cmd st = case applyCommand cmd (stProject st) of
+applyLocked s emit cmd st = applyAs s emit (describeChange (stProject st) cmd) cmd st
+
+-- | Apply a command, noting it in the history as a given change.
+applyAs :: Session -> Emit -> Change -> Command -> St -> IO (Either ServiceError St)
+applyAs s emit change cmd st = case applyCommand cmd (stProject st) of
     Left (CommandError code msg params) ->
         let ecode = if code == "unknown_track" then UnknownTrack else InvalidValue
             detail = if null params then Nothing else Just (object ["params" .= params])
         in return (Left (ServiceError ecode msg detail))
     Right p -> do
-        let changed = fmap validText (projectValidScore p) /= fmap validText (projectValidScore (stProject st))
-            since = if changed then projectRevision p else stValidSince st
-        Right <$> startRenderLocked s emit False st { stProject = p, stValidSince = since }
+        now <- getMonotonicTime
+        Right <$> showProject s emit p st { stHistory = record now change (stProject st) p (stHistory st) }
+
+-- | Make a project current and render it if its playable song changed.
+showProject :: Session -> Emit -> Project -> St -> IO St
+showProject s emit p st = do
+    let changed = fmap validText (projectValidScore p) /= fmap validText (projectValidScore (stProject st))
+        since = if changed then projectRevision p else stValidSince st
+    startRenderLocked s emit False st { stProject = p, stValidSince = since }
+
+-- | How a command reads in the history ("Undo typing"), and which commands
+-- merge when they follow each other quickly.
+describeChange :: Project -> Command -> Change
+describeChange p cmd = case cmd of
+    SetScoreText _ -> Change "typing" (Just "score") 2
+    SetTrackPatch tid _ -> Change ("sound change on " <> name tid) (Just ("patch:" <> trackIdText tid)) 1.5
+    ResetTrackPatch tid -> Change ("going back to the score's sound on " <> name tid) Nothing 0
+    UpdateTrackMix tid (MixUpdate g pn m so)
+        | isJust m -> Change ((if m == Just True then "muting " else "unmuting ") <> name tid) Nothing 0
+        | isJust so -> Change ((if so == Just True then "soloing " else "unsoloing ") <> name tid) Nothing 0
+        | isJust g -> Change ("level change on " <> name tid) (Just ("gain:" <> trackIdText tid)) 1.5
+        | isJust pn -> Change ("pan change on " <> name tid) (Just ("pan:" <> trackIdText tid)) 1.5
+        | otherwise -> Change "mix change" Nothing 0
+    SetMasterGain _ -> Change "master level change" (Just "master") 1.5
+    AdoptRetiredSettings _ to -> Change ("moving settings to " <> name to) Nothing 0
+  where
+    name tid = maybe "a track" trackScoreName (findTrack tid p)
+
+-- | Step back (or forward) through the history.
+undoChange, redoChange :: Session -> Emit -> IO Value
+undoChange s emit = travel s emit undo
+redoChange s emit = travel s emit redo
+
+travel :: Session -> Emit -> (Project -> History -> Maybe (Project, History)) -> IO Value
+travel s emit step = modifyMVar (sState s) $ \st -> case step (stProject st) (stHistory st) of
+    Nothing -> (,) st <$> projectViewLocked st
+    Just (p, h) -> do
+        let p' = p { projectRevision = nextRevision (projectRevision (stProject st)) }
+        st' <- showProject s emit p' st { stHistory = h }
+        v <- projectViewLocked st'
+        return (st', v)
 
 versionView :: Text -> ScoreVersion -> Value
 versionView current v = object
@@ -415,7 +490,7 @@ generate s emit g = case validateSettings g of
         (Just (object ["params" .= [ ParamError k m | (k, m) <- problems ]]))
     [] -> do
         let txt = printSong (generateScore g)
-        replaceScore s emit txt $ \st ->
+        replaceScore s emit "generating" txt $ \st ->
             let kept = keepCurrent "Before generating" st
                 again = map versionText (take 1 (stVersions kept)) == [txt]
             in \rev -> if again then kept
@@ -427,16 +502,16 @@ restoreVersion s emit vid = do
     found <- withMVar (sState s) (\st -> return (filter ((== vid) . versionId) (stVersions st)))
     case found of
         [] -> return (Left (ServiceError InvalidValue "There is no such version" Nothing))
-        (v : _) -> replaceScore s emit (versionText v) $ \st ->
+        (v : _) -> replaceScore s emit "restoring a version" (versionText v) $ \st ->
             let kept = keepCurrent ("Before restoring " <> T.toLower (T.take 1 (versionLabel v)) <> T.drop 1 (versionLabel v)) st
             in const kept
 
 -- | Set the score text and update the kept versions in one step. @keep@
 -- sees the state before the change and the revision after it; only its
 -- versions are used.
-replaceScore :: Session -> Emit -> Text -> (St -> Revision -> St) -> IO (Either ServiceError Value)
-replaceScore s emit txt keep = modifyMVar (sState s) $ \st ->
-    applyLocked s emit (SetScoreText txt) st >>= \r -> case r of
+replaceScore :: Session -> Emit -> Text -> Text -> (St -> Revision -> St) -> IO (Either ServiceError Value)
+replaceScore s emit what txt keep = modifyMVar (sState s) $ \st ->
+    applyAs s emit (Change what Nothing 0) (SetScoreText txt) st >>= \r -> case r of
         Left e -> return (st, Left e)
         Right st' -> do
             let versions = keep st (projectRevision (stProject st'))
@@ -617,6 +692,7 @@ replaceProject s emit path p versions st0 = do
             , stVersions = kept, stNextVersion = length kept + 1
             , stFile = path, stSavedRevision = rev
             , stValidSince = rev
+            , stHistory = emptyHistory
             }
     st3 <- startRenderLocked s emit False st2
     v <- transportViewLocked st3
@@ -636,7 +712,7 @@ importScore s emit path = do
             Left _ -> return (Left (serviceError FileError "The file is not a text score (it is not UTF-8 text)."))
             Right txt -> do
                 let clean = maybe txt id (T.stripPrefix "\xFEFF" txt)
-                replaceScore s emit clean $ \st -> const (keepCurrent ("Before importing " <> T.pack (takeFileName path)) st)
+                replaceScore s emit "importing a score" clean $ \st -> const (keepCurrent ("Before importing " <> T.pack (takeFileName path)) st)
 
 -- | Write the score text, exactly as edited, to a .sonora file.
 exportScore :: Session -> FilePath -> IO (Either ServiceError Value)
@@ -648,6 +724,92 @@ exportScore s path = do
         return $ case result of
             Left e -> Left (serviceError FileError (writeFailure "Saving the score failed" path e))
             Right () -> Right (object ["path" .= path])
+
+-------------------------------------------------------------------------------
+-- Recovery
+
+-- | Begin keeping unsaved work safe. An autosave already in the recovery
+-- folder is left alone until it is restored or discarded.
+startAutosaver :: Session -> IO ()
+startAutosaver s = case sessionRecoveryDir (sConfig s) of
+    Nothing -> return ()
+    Just dir -> do
+        found <- findAutosave dir
+        tid <- forkIO (forever (threadDelay (sessionAutosaveMicros (sConfig s)) >> autosaveNow s))
+        modifyMVar_ (sState s) $ \st -> return st
+            { stRecoveryPending = found /= NoAutosave, stAutosaver = Just tid }
+
+-- | Write unsaved work if it changed since the last autosave, or remove the
+-- autosave once nothing is unsaved. The file is written outside the lock.
+autosaveNow :: Session -> IO ()
+autosaveNow s = case sessionRecoveryDir (sConfig s) of
+    Nothing -> return ()
+    Just dir -> do
+        todo <- modifyMVar (sState s) $ \st -> do
+            let p = stProject st
+                rev = projectRevision p
+                modified = rev /= stSavedRevision st
+                file = ProjectFile p [ SavedVersion (versionLabel v) (versionText v) (versionSettings v) | v <- stVersions st ]
+            return $ if stRecoveryPending st then (st, return ())
+                else if modified && stAutosaved st /= Just rev
+                    then (st { stAutosaved = Just rev }, writeOrForget (writeAutosave dir (stFile st) file))
+                else if not modified && isJust (stAutosaved st)
+                    then (st { stAutosaved = Nothing }, removeAutosave dir)
+                else (st, return ())
+        todo
+  where
+    -- A failed write is tried again on the next round.
+    writeOrForget act = do
+        r <- try act
+        case r of
+            Left (_ :: SomeException) -> modifyMVar_ (sState s) (\st -> return st { stAutosaved = Nothing })
+            Right () -> return ()
+
+-- | Whether work from an earlier session can be recovered. An autosave that
+-- cannot be read is moved aside and reported, never deleted.
+checkRecovery :: Session -> IO Value
+checkRecovery s = case sessionRecoveryDir (sConfig s) of
+    Nothing -> return (object ["available" .= False])
+    Just dir -> modifyMVar (sState s) $ \st ->
+        if not (stRecoveryPending st) then return (st, object ["available" .= False]) else do
+            found <- findAutosave dir
+            case found of
+                NoAutosave -> return (st { stRecoveryPending = False }, object ["available" .= False])
+                Recoverable info (ProjectFile p _) -> return (st, object
+                    [ "available" .= True
+                    , "file" .= recoveryFile info
+                    , "name" .= fmap takeFileName (recoveryFile info)
+                    , "savedAt" .= recoverySaved info
+                    , "title" .= fmap (astSongTitle . validAst) (projectValidScore p) ])
+                Unrecoverable e -> do
+                    aside <- setAsideAutosave dir
+                    return (st { stRecoveryPending = False }, object
+                        [ "available" .= False
+                        , "problem" .= ("Unsaved work from last time could not be read (" <> loadErrorMessage e <> ")"
+                            <> maybe "" (\a -> " It was kept as " <> T.pack a <> ".") aside) ])
+
+-- | Bring back the work from the autosave. It stays unsaved until saved.
+restoreRecovery :: Session -> Emit -> IO (Either ServiceError Value)
+restoreRecovery s emit = case sessionRecoveryDir (sConfig s) of
+    Nothing -> return (Left (serviceError InvalidValue "There is nothing to recover"))
+    Just dir -> do
+        found <- findAutosave dir
+        case found of
+            Recoverable info (ProjectFile p versions) -> fmap Right . modifyMVar (sState s) $ \st -> do
+                st1 <- replaceProject s emit (recoveryFile info) p versions st
+                let st2 = st1 { stRecoveryPending = False, stSavedRevision = Revision (-1), stAutosaved = Nothing }
+                v <- projectViewLocked st2
+                return (st2, v)
+            Unrecoverable e -> return (Left (serviceError InvalidProject (loadErrorMessage e)))
+            NoAutosave -> return (Left (serviceError InvalidValue "There is nothing to recover"))
+
+-- | Drop unsaved work: the autosave from before, or the current changes when
+-- the user closes without saving.
+discardRecovery :: Session -> IO Value
+discardRecovery s = modifyMVar (sState s) $ \st -> do
+    forM_ (sessionRecoveryDir (sConfig s)) removeAutosave
+    return ( st { stRecoveryPending = False, stSavedRevision = projectRevision (stProject st), stAutosaved = Nothing }
+           , object ["discarded" .= True] )
 
 -------------------------------------------------------------------------------
 -- Audition

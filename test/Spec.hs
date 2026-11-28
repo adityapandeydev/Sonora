@@ -15,6 +15,7 @@ import GenerateSpec (generateTests)
 import AuditionSpec (auditionTests)
 import MixSpec (mixTests)
 import PersistenceSpec (persistenceTests)
+import HistorySpec (historyTests)
 
 main :: IO ()
 main = do
@@ -43,8 +44,9 @@ main = do
     p11 <- auditionTests
     p12 <- mixTests
     p13 <- persistenceTests
+    p14 <- historyTests
     putStrLn "========================================================"
-    if p1 && p2 && p3 && p4 && p5 && p6 && p7 && p8 && p9 && p10 && p11 && p12 && p13
+    if p1 && p2 && p3 && p4 && p5 && p6 && p7 && p8 && p9 && p10 && p11 && p12 && p13 && p14
         then do
             putStrLn "  ALL TEST SUITES PASSED SUCCESSFULLY! (100%)"
             putStrLn "========================================================"

@@ -19,12 +19,13 @@ import System.IO
 import Paths_sonora (version)
 import Sonora.Service.Methods
 import Sonora.Service.Server
-import Sonora.Service.Session (closeSession, defaultSessionConfig, newSession)
+import Sonora.Service.Session (SessionConfig (..), closeSession, defaultSessionConfig, newSession)
 
 data Options = Options
     { optMaxMessageBytes :: !Int
     , optDiagnostics     :: !Bool
     , optQuiet           :: !Bool
+    , optRecoveryDir     :: !(Maybe FilePath)
     }
 
 optionsParser :: Parser Options
@@ -33,6 +34,8 @@ optionsParser = Options
                      <> showDefault <> help "Largest accepted request line")
     <*> switch (long "enable-diagnostic-methods" <> help "Serve diagnostic.* methods used by integration tests")
     <*> switch (long "quiet" <> help "Suppress diagnostic logging on stderr")
+    <*> optional (strOption (long "recovery-dir" <> metavar "DIR"
+                             <> help "Keep unsaved work here between saves and offer it after a crash"))
 
 main :: IO ()
 main = do
@@ -41,7 +44,7 @@ main = do
     hSetEncoding stderr utf8
     hSetBuffering stderr LineBuffering
     logLock <- newMVar ()
-    session <- newSession defaultSessionConfig
+    session <- newSession defaultSessionConfig { sessionRecoveryDir = optRecoveryDir opts }
     let logLine msg
             | optQuiet opts = return ()
             | otherwise = withMVar logLock $ \_ -> TIO.hPutStrLn stderr ("[sonora-service] " <> msg)

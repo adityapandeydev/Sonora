@@ -76,6 +76,8 @@ library
         Sonora.Project.Mix
         Sonora.Project.Migration
         Sonora.Project.Persistence
+        Sonora.Project.History
+        Sonora.Project.Recovery
         Sonora.Audio.Backend
         Sonora.Audio.Mixer
         Sonora.Audio.Audition
@@ -102,6 +104,7 @@ library
         parsec >= 3.1,
         process >= 1.6,
         text >= 1.2,
+        time >= 1.9,
         vector >= 0.12
 
 executable sonora
@@ -160,6 +163,7 @@ test-suite sonora-test
         AuditionSpec
         MixSpec
         PersistenceSpec
+        HistorySpec
     build-tool-depends:
         sonora:sonora-service
     build-depends:
