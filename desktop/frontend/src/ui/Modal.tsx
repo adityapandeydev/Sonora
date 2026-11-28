@@ -7,7 +7,11 @@ export function Modal({ open, title, onClose, children, className }: { open: boo
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
-    if (open && !el.open) el.showModal();
+    if (open && !el.open) {
+      el.showModal();
+      // A dialog may name its safe default; otherwise the first control gets focus.
+      el.querySelector<HTMLElement>("[data-autofocus]")?.focus();
+    }
     if (!open && el.open) el.close();
   }, [open]);
   return (

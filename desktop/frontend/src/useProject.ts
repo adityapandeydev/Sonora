@@ -3,7 +3,7 @@
 // this hook only keeps the latest view of it and the local editor text.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { EngineError, onEngineEvent, request } from "./engine";
-import type { GenSettings, LoopRange, ProjectView, RenderPeaks, RenderProgress, ScoreTiming, TransportView } from "./protocol";
+import type { GenSettings, LoopRange, ProjectView, RecoveryCheck, RenderPeaks, RenderProgress, ScoreTiming, TransportView } from "./protocol";
 
 /** Idle time after typing before the engine validates the score. */
 export const VALIDATE_AFTER_MS = 250;
@@ -193,6 +193,16 @@ export function useProject(ready: boolean) {
     [accept],
   );
 
+  // Undo and redo include typing not yet sent.
+  const travel = useCallback(
+    async (method: "history.undo" | "history.redo") => {
+      setError(null);
+      await flush();
+      take(await request<ProjectView>(method));
+    },
+    [flush, take],
+  );
+
   const files = {
     save: async (path?: string) => {
       await flush();
@@ -253,6 +263,12 @@ export function useProject(ready: boolean) {
     command,
     files,
     report,
+    undo: () => travel("history.undo").catch(report),
+    redo: () => travel("history.redo").catch(report),
+    /** Work from a session that ended without saving, if any. */
+    checkRecovery: () => request<RecoveryCheck>("recovery.check"),
+    restoreRecovery: async () => take(await request<ProjectView>("recovery.restore")),
+    discardUnsaved: () => request("recovery.discard"),
     /** A command whose failure is reported in the workspace. */
     act: (cmd: unknown) => {
       setError(null);

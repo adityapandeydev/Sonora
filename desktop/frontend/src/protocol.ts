@@ -128,8 +128,21 @@ export interface ProjectView {
   versions: ScoreVersion[];
   /** What the generator accepts. */
   generator: { roots: string[]; scales: string[] };
+  /** What undo and redo would do next, e.g. "typing". */
+  history: { undo: string | null; redo: string | null };
   /** Where the project lives, and whether it has unsaved changes. */
   file: { path: string | null; name: string | null; modified: boolean };
+}
+
+/** Unsaved work from a session that ended without saving. */
+export interface RecoveryCheck {
+  available: boolean;
+  file?: string | null;
+  name?: string | null;
+  savedAt?: string;
+  title?: string | null;
+  /** An autosave that could not be read, and where it was kept. */
+  problem?: string;
 }
 
 /** Settings for project.generate. */

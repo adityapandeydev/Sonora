@@ -1,6 +1,11 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ExportDialog, useExport } from "./ExportDialog";
-import { FileMenu, UnsavedDialog, useFiles } from "./FileMenu";
+import { Events } from "@wailsio/runtime";
+import { WindowService } from "../bindings/github.com/adityapandeydev/Sonora/desktop";
+import { AppCloseRequested } from "../bindings/events";
+import { EditMenu, FileMenu, UnsavedDialog, useFiles } from "./FileMenu";
+import { RecoveryDialog } from "./RecoveryDialog";
+import type { RecoveryCheck } from "./protocol";
 import { GenerateDialog, VersionsDialog } from "./GenerateDialog";
 import { engineStatus, onEngineStatus, restartEngine, State, type Status } from "./engine";
 import { useProject } from "./useProject";
@@ -44,13 +49,20 @@ export default function App() {
   const files = useFiles(session, project);
   const ready = state === State.StateReady && project !== null;
 
-  // File shortcuts, outside dialogs.
+  // File and history shortcuts, outside dialogs. Undo belongs to the
+  // engine everywhere, the score editor included.
   useEffect(() => {
     if (!ready) return;
     const keys = (e: KeyboardEvent) => {
       if (!(e.ctrlKey || e.metaKey) || e.altKey || document.querySelector("dialog[open]")) return;
       const k = e.key.toLowerCase();
-      const run = k === "s" ? (e.shiftKey ? files.saveAs : files.save) : !e.shiftKey && k === "o" ? files.open : !e.shiftKey && k === "n" ? files.create : null;
+      const run =
+        k === "s" ? (e.shiftKey ? files.saveAs : files.save)
+        : k === "z" ? (e.shiftKey ? session.redo : session.undo)
+        : !e.shiftKey && k === "y" ? session.redo
+        : !e.shiftKey && k === "o" ? files.open
+        : !e.shiftKey && k === "n" ? files.create
+        : null;
       if (!run) return;
       e.preventDefault();
       run();
@@ -58,6 +70,43 @@ export default function App() {
     window.addEventListener("keydown", keys);
     return () => window.removeEventListener("keydown", keys);
   });
+
+  // Each time an engine becomes ready, ask it about work left unsaved.
+  const [recovery, setRecovery] = useState<RecoveryCheck | null>(null);
+  const checkRecovery = session.checkRecovery;
+  const notify = files.notify;
+  useEffect(() => {
+    if (!ready) return;
+    let live = true;
+    checkRecovery()
+      .then((r) => {
+        if (!live) return;
+        if (r.problem) notify(r.problem);
+        setRecovery(r.available ? r : null);
+      })
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [ready]);
+
+  // The host asks before the window closes.
+  const latest = useRef({ files, ready });
+  latest.current = { files, ready };
+  useEffect(
+    () =>
+      Events.On(AppCloseRequested, () => {
+        WindowService.CloseRequestSeen();
+        const { files: f, ready: r } = latest.current;
+        if (!r) return void WindowService.Close();
+        f.close(
+          () => WindowService.Close(),
+          () => WindowService.CloseCancelled(),
+        );
+      }),
+    [],
+  );
 
   const fileName = project?.file.name ?? "Untitled";
   // A score without a title is named by its file.
@@ -91,6 +140,7 @@ export default function App() {
         {open ? (
           <div className="top-actions">
             <FileMenu files={files} />
+            <EditMenu project={project} onUndo={session.undo} onRedo={session.redo} />
             <button type="button" className="button on-shell" onClick={() => setDialog("versions")} disabled={project.versions.length === 0} title="Scores replaced by generating or restoring">
               Versions{project.versions.length > 0 ? ` (${project.versions.length})` : ""}
             </button>
@@ -116,6 +166,7 @@ export default function App() {
           <VersionsDialog open={dialog === "versions"} versions={project.versions} onClose={() => setDialog(null)} onRestore={session.restoreVersion} />
           <ExportDialog open={dialog === "export"} project={project} exporter={exporter} onClose={() => setDialog(null)} />
           <UnsavedDialog files={files} project={project} />
+          <RecoveryDialog found={recovery} onRestore={session.restoreRecovery} onDiscard={session.discardUnsaved} onDone={() => setRecovery(null)} />
         </>
       ) : null}
       {open ? (

@@ -20,6 +20,20 @@ var assets embed.FS
 func init() {
 	application.RegisterEvent[engine.Status](EventEngineStatus)
 	application.RegisterEvent[EngineEvent](EventEngineEvent)
+	application.RegisterEvent[string](EventCloseRequested)
+}
+
+// recoveryDir is where the engine keeps unsaved work between saves:
+// SONORA_RECOVERY_DIR if set, otherwise %LOCALAPPDATA%\Sonora\recovery.
+func recoveryDir() string {
+	if d := os.Getenv("SONORA_RECOVERY_DIR"); d != "" {
+		return d
+	}
+	base, err := os.UserCacheDir() // %LOCALAPPDATA% on Windows
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(base, "Sonora", "recovery")
 }
 
 // enginePath locates sonora-service: SONORA_SERVICE_EXE if set, otherwise
@@ -40,8 +54,18 @@ func main() {
 		log.Println("logging to", path)
 	}
 	var app *application.App
+	windows := &WindowService{emit: func(name string) {
+		if app != nil {
+			app.Event.Emit(name, "")
+		}
+	}}
+	var args []string
+	if dir := recoveryDir(); dir != "" {
+		args = append(args, "--recovery-dir", dir)
+	}
 	sup := engine.New(engine.Config{
 		Command: enginePath(),
+		Args:    args,
 		OnStatus: func(st engine.Status) {
 			log.Printf("engine status: %s %s", st.State, st.Detail)
 			if app != nil {
@@ -61,13 +85,15 @@ func main() {
 		Description: "Music composition and synthesis",
 		Services: []application.Service{
 			application.NewService(&EngineService{sup: sup}),
+			application.NewService(windows),
 		},
 		Assets: application.AssetOptions{
 			Handler: application.AssetFileServerFS(assets),
 		},
 	})
 
-	app.Window.NewWithOptions(application.WebviewWindowOptions{
+	windows.sup = sup
+	window := app.Window.NewWithOptions(application.WebviewWindowOptions{
 		Title:     "Sonora",
 		Width:     1280,
 		Height:    800,
@@ -75,6 +101,7 @@ func main() {
 		MinHeight: 480,
 		URL:       "/",
 	})
+	windows.Guard(window)
 
 	if err := app.Run(); err != nil {
 		log.Fatal(err)
